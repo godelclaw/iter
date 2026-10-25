@@ -1,9 +1,13 @@
 ;; Iter main loop ("# 4. Main loop" of the original iter.py) in MeTTa (PeTTa).
-;; utils.py provides the Python helpers via py-call (dynamic execution, OpenAI client, JSON, file listing).
+;; utils.py provides the Python helpers (dynamic execution, OpenAI client, JSON, file listing),
+;; its functions become MeTTa functions of the same name via pyimport of petta_lib_easypy.
 ;; Python variables of the loop are MeTTa states with the same names (&experience, &post_task_mode, ...).
 ;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant "<json>") (raw "<json>")
 
-!(import! &self "utils.py")
+!(import! &self (library lib_import))
+!(git-import! "https://github.com/patham9/petta_lib_easypy.git")
+!(import! &self (library petta_lib_easypy lib_easypy))
+!(pyimport utils.py)
 !(import_prolog_function atomics_to_string)
 !(import_prolog_function string_length)
 !(import_prolog_function sub_string)
@@ -30,14 +34,14 @@
 ;; --------------------------------------------------------------------
 (= (str-cat $parts) (atomics_to_string $parts))
 (= (empty-string $s) (== (string_length $s) 0))
-(= (join $sep $list) (py-call (.join $sep $list)))
+(= (join $sep $list) (if (== $list ()) "" (foldl-atom (cdr-atom $list) (car-atom $list) $acc $x (str-cat ($acc $sep $x)))))
 (= (snoc $list $x) (append $list ($x)))
 (= (push! $state $x) (change-state! $state (snoc (get-state $state) $x)))
 (= (sleep $t) (progn (translatePredicate (sleep $t)) true))
 (= (gc) (progn (translatePredicate (garbage_collect)) true))
 (= (get_current_time) (format-time "%Y-%m-%d %H:%M:%S"))
 (= (step $text) (str-cat ("Step " (get_current_time) ": " $text)))
-(= (save_experience) (py-call (utils.save_experience (get-state &experience))))
+(= (save_experience) (save_experience (get-state &experience)))
 (= (truncate $s $n) (str-cat ((sub_string $s 0 $n $_) " [TRUNCATED]")))
 (= (take $n $list) (if (or (<= $n 0) (== $list ())) () (cons-atom (car-atom $list) (take (- $n 1) (cdr-atom $list)))))
 (= (drop $n $list) (if (or (<= $n 0) (== $list ())) $list (drop (- $n 1) (cdr-atom $list))))
@@ -45,7 +49,7 @@
    (case $error
          (((Error $type $ctx)
            (let $r (collapse (progn (translatePredicate (= $type (Predicate (python_error $T $V))))
-                                    (py-call (utils.exception_text $V))))
+                                    (exception_text $V)))
                 (if (== $r ()) (repr $type) (car-atom $r))))
           ($other (repr $other)))))
 
@@ -53,8 +57,8 @@
 ;; 2. Runtime helpers (receive, slow_wait_for_input)
 ;; --------------------------------------------------------------------
 (= (receive)
-   (join "\n" (filter-atom (map-atom (py-call (utils.channel_paths)) $path
-                                     (py-call (utils.receive_channel $path)))
+   (join "\n" (filter-atom (map-atom (channel_paths) $path
+                                     (receive_channel $path))
                            $event (not (empty-string $event)))))
 
 (= (slow_wait_for_input) (slow_wait_for_input 0))
@@ -76,8 +80,8 @@
                             (((tool $id $content) (if (> (string_length $content) (RETURN_VALUE_PRESERVE))
                                                       (tool $id (truncate $content (RETURN_VALUE_PRESERVE)))
                                                       (tool $id $content)))
-                             ((assistant $m) (assistant (py-call (utils.strip_reasoning $m))))
-                             ((raw $m) (raw (py-call (utils.strip_reasoning $m))))
+                             ((assistant $m) (assistant (strip_reasoning $m)))
+                             ((raw $m) (raw (strip_reasoning $m)))
                              ($old_message $old_message)))
                       (car-atom $experience))
                   (cleanup_old_messages (cdr-atom $experience) (+ $i 1) $n))))
@@ -96,8 +100,8 @@
 (= (cleanup_interval) (- (MAX_EXPERIENCE_SIZE) (RETAIN_EXPERIENCE_SIZE)))
 
 (= (main)
-   (progn (change-state! &experience (py-call (utils.load_experience)))
-          (py-call (utils.init_client))
+   (progn (change-state! &experience (load_experience))
+          (init_client)
           (sleep (INIT_WAIT))
           (translatePredicate (make_directory_path "memory"))
           (translatePredicate (make_directory_path "transformations"))
@@ -150,7 +154,7 @@
          (println! (str-cat ("RESPONSE " (get-state &response) "\nFINISH_REASON " (get-state &finish_reason) "\nUSAGE " (get-state &usage))))
          (push! &experience (assistant (if (KEEP_REASONING_IN_EPISODE)
                                            (get-state &message)
-                                           (py-call (utils.strip_reasoning (get-state &message))))))
+                                           (strip_reasoning (get-state &message)))))
          (change-state! &tool_outputs ())
          (map-atom (get-state &tool_calls) $tool_call (ToolCall $tool_call))
          (change-state! &history_checkpoint (size-atom (get-state &experience))) ;tool calls succeeded, even on later exception we won't unroll them
@@ -179,50 +183,50 @@
 (= (LLMLoop $retry_message)
    (progn
      (change-state! &temporary_message (append (get-state &base_temporary_message) $retry_message))
-     (let ($INOPS $omitted_tools $tool_load_error) (py-call (utils.load_tools))
+     (let ($INOPS $omitted_tools $tool_load_error) (load_tools)
           (progn (change-state! &INOPS $INOPS)
                  (if (not (empty-string $tool_load_error)) (push! &temporary_message (user $tool_load_error)) _)
                  (if (> $omitted_tools 0)
                      (push! &temporary_message (user (str-cat ("[TOOL LIMIT REACHED: " $omitted_tools " tools are currently omitted. Consolidate or remove tools if they are needed.]")))) _)))
-     (change-state! &TOOLS (py-call (utils.native_tools (get-state &INOPS))))
-     (change-state! &TRANSFORMATIONS (py-call (utils.load_transformation_descriptions)))
-     (let* (($memory_contents (py-call (utils.memory_files)))
+     (change-state! &TOOLS (native_tools (get-state &INOPS)))
+     (change-state! &TRANSFORMATIONS (load_transformation_descriptions))
+     (let* (($memory_contents (memory_files))
             ($memory_len (foldl-atom $memory_contents 0 $acc $mc (+ $acc (string_length (index-atom $mc 1))))))
            (if (<= $memory_len (MAX_MEMORY_CHARS))
                (change-state! &MEMORY (str-cat ("[" (- (MAX_MEMORY_CHARS) $memory_len) " CHARACTERS BELOW MAXIMUM]\n./memory/:\n"
                                                 (join "\n\n" (map-atom $memory_contents $mc (let ($path $content) $mc (str-cat ($path ":\n" $content))))))))
                (progn (change-state! &MEMORY (str-cat ("./memory/:\n" (join "\n" (map-atom $memory_contents $mc (index-atom $mc 0))))))
                       (push! &temporary_message (user (str-cat ("[MEMORY FOLDER TOTAL CHARACTER CAPACITY BY FILES NOT BEGINNING WITH _ EXCEEDED BY " (- $memory_len (MAX_MEMORY_CHARS)) " CHARS. FIX THIS FIRST.]")))))))
-     (change-state! &request_messages (cons-atom (system (str-cat ("prompt.txt:\n" (py-call (utils.read_prompt))
+     (change-state! &request_messages (cons-atom (system (str-cat ("prompt.txt:\n" (read_prompt)
                                                                    "\n\n./transformations/:\n" (get-state &TRANSFORMATIONS)
                                                                    "\n\n" (get-state &MEMORY))))
                                                  (append (get-state &experience) (get-state &temporary_message))))
-     (let ($request_messages $request_tools $transformation_error) (py-call (utils.apply_transformation (get-state &request_messages) (get-state &TOOLS)))
+     (let ($request_messages $request_tools $transformation_error) (apply_transformation (get-state &request_messages) (get-state &TOOLS))
           (progn (change-state! &request_messages $request_messages)
                  (change-state! &request_tools $request_tools)
                  (if (not (empty-string $transformation_error)) (push! &request_messages (user $transformation_error)) _)))
      (println! "BEFORE LLM")
-     (let ($message $finish_reason $response $usage) (py-call (utils.llm (get-state &request_messages) (get-state &request_tools)))
+     (let ($message $finish_reason $response $usage) (llm (get-state &request_messages) (get-state &request_tools))
           (progn (change-state! &message $message)
                  (change-state! &finish_reason $finish_reason)
                  (change-state! &response $response)
                  (change-state! &usage $usage)))
      (println! (str-cat ("AFTER LLM " (get-state &response))))
-     (let $content (py-call (utils.message_content (get-state &message)))
+     (let $content (message_content (get-state &message))
           (if (not (empty-string $content))
-              (change-state! &message (py-call (utils.set_message_content (get-state &message) (str-cat ($content "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]"))))) _))
-     (change-state! &tool_calls (py-call (utils.message_tool_calls (get-state &message))))
+              (change-state! &message (set_message_content (get-state &message) (str-cat ($content "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]")))) _))
+     (change-state! &tool_calls (message_tool_calls (get-state &message)))
      (if (not (== (get-state &tool_calls) ()))
-         (progn (change-state! &message (py-call (utils.limit_tool_calls (get-state &message) (MAX_TOOL_CALLS))))
+         (progn (change-state! &message (limit_tool_calls (get-state &message) (MAX_TOOL_CALLS)))
                 (change-state! &tool_calls (take (MAX_TOOL_CALLS) (get-state &tool_calls)))) ;break
          (LLMLoop (if (== (get-state &finish_reason) length)
                       ((user "[OUTPUT TOKEN LIMIT REACHED. CALL THE REQUIRED TOOL CONCISELY.]"))
                       ((user (str-cat ("[YOUR PREVIOUS RESPONSE CONTAINED NO TOOL CALL AND WAS NOT DELIVERED. CALL AT LEAST ONE TOOL NOW. IF YOU INTENDED THIS CONTENT AS COMMUNICATION, USE send: "
-                                       (py-call (utils.message_content_repr (get-state &message))) "]")))))))))
+                                       (message_content_repr (get-state &message)) "]")))))))))
 
 ;; Body of "for tool_call in message.tool_calls:"
 (= (ToolCall ($id $tool_name $arguments))
-   (let* ((($status $tool_arguments $parse_error) (py-call (utils.parse_tool_arguments $arguments)))
+   (let* ((($status $tool_arguments $parse_error) (parse_tool_arguments $arguments))
           ($tool (filter-atom (get-state &INOPS) $inop (== (index-atom $inop 0) $tool_name)))
           ($ret0 (if (== $status invalid)
                      $parse_error
@@ -230,7 +234,7 @@
                          (str-cat ("Unknown tool: " $tool_name))
                          (if (== $status notdict)
                              "Tool arguments must be a JSON object"
-                             (py-call (utils.invoke_tool (index-atom (car-atom $tool) 1) $arguments))))))
+                             (invoke_tool (index-atom (car-atom $tool) 1) $arguments)))))
           ($ret (if (> (string_length $ret0) (MAX_TOOL_OUTPUT_CHARS)) (truncate $ret0 (MAX_TOOL_OUTPUT_CHARS)) $ret0)))
          (progn (push! &experience (tool $id (step $ret)))
                 (push! &tool_outputs (str-cat ("tool call: " $tool_name " " $tool_arguments "\ntool return: " $ret))))))
