@@ -1,20 +1,25 @@
 ;; Iter main loop ("# 4. Main loop" of the original iter.py) in MeTTa (PeTTa).
-;; utils.py provides the Python helpers (dynamic execution, OpenAI client, JSON, file listing),
-;; its functions become MeTTa functions of the same name via pyimport of petta_lib_easypy.
+;; utils.metta provides the helpers (dynamic execution, JSON, file listing), the OpenAI client stays in utils.py.
+;; All configuration is here and passed onward to the utils functions as arguments.
 ;; Python variables of the loop are MeTTa states with the same names (&experience, &post_task_mode, ...).
 ;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant "<json>") (raw "<json>")
 
-!(import! &self (library lib_import))
-!(git-import! "https://github.com/patham9/petta_lib_easypy.git")
-!(import! &self (library petta_lib_easypy lib_easypy))
-!(pyimport utils.py)
+!(import! &self utils)
 !(import_prolog_function atomics_to_string)
 !(import_prolog_function string_length)
 !(import_prolog_function sub_string)
 
 ;; --------------------------------------------------------------------
-;; 0. Configuration (loop part):
+;; 0. Configuration:
 ;; --------------------------------------------------------------------
+(= (LLM_TIMEOUT) 600)
+(= (MAX_TOKENS) 2524)
+(= (MAX_TOOLS) 30)
+(= (MAX_TOOL_DESCRIPTION_CHARS) 500)
+(= (DYNAMIC_TIMEOUT) 5)
+(= (MODEL) (getenv-default "LLM_MODEL" "mlx-community/gemma-4-26b-a4b-it-4bit"))
+(= (BASE_URL) (getenv-default "BASE_URL" "http://192.168.64.1:2277/v1"))
+(= (API_KEY) (getenv-default "AI_API_KEY" "dummy"))
 (= (MAX_MEMORY_CHARS) 3000) ;When memory turns into an index
 (= (KEEP_REASONING_IN_EPISODE) true)
 (= (MAX_TOOL_CALLS) 10)
@@ -58,7 +63,7 @@
 ;; --------------------------------------------------------------------
 (= (receive)
    (join "\n" (filter-atom (map-atom (channel_paths) $path
-                                     (receive_channel $path))
+                                     (receive_channel $path (DYNAMIC_TIMEOUT)))
                            $event (not (empty-string $event)))))
 
 (= (slow_wait_for_input) (slow_wait_for_input 0))
@@ -101,7 +106,7 @@
 
 (= (main)
    (progn (change-state! &experience (load_experience))
-          (init_client)
+          (init_client (BASE_URL) (API_KEY) (LLM_TIMEOUT))
           (sleep (INIT_WAIT))
           (translatePredicate (make_directory_path "memory"))
           (translatePredicate (make_directory_path "transformations"))
@@ -183,13 +188,13 @@
 (= (LLMLoop $retry_message)
    (progn
      (change-state! &temporary_message (append (get-state &base_temporary_message) $retry_message))
-     (let ($INOPS $omitted_tools $tool_load_error) (load_tools)
+     (let ($INOPS $omitted_tools $tool_load_error) (load_tools (MAX_TOOLS) (MAX_TOOL_DESCRIPTION_CHARS) (DYNAMIC_TIMEOUT))
           (progn (change-state! &INOPS $INOPS)
                  (if (not (empty-string $tool_load_error)) (push! &temporary_message (user $tool_load_error)) _)
                  (if (> $omitted_tools 0)
                      (push! &temporary_message (user (str-cat ("[TOOL LIMIT REACHED: " $omitted_tools " tools are currently omitted. Consolidate or remove tools if they are needed.]")))) _)))
      (change-state! &TOOLS (native_tools (get-state &INOPS)))
-     (change-state! &TRANSFORMATIONS (load_transformation_descriptions))
+     (change-state! &TRANSFORMATIONS (load_transformation_descriptions (DYNAMIC_TIMEOUT)))
      (let* (($memory_contents (memory_files))
             ($memory_len (foldl-atom $memory_contents 0 $acc $mc (+ $acc (string_length (index-atom $mc 1))))))
            (if (<= $memory_len (MAX_MEMORY_CHARS))
@@ -201,12 +206,12 @@
                                                                    "\n\n./transformations/:\n" (get-state &TRANSFORMATIONS)
                                                                    "\n\n" (get-state &MEMORY))))
                                                  (append (get-state &experience) (get-state &temporary_message))))
-     (let ($request_messages $request_tools $transformation_error) (apply_transformation (get-state &request_messages) (get-state &TOOLS))
+     (let ($request_messages $request_tools $transformation_error) (apply_transformation (get-state &request_messages) (get-state &TOOLS) (DYNAMIC_TIMEOUT))
           (progn (change-state! &request_messages $request_messages)
                  (change-state! &request_tools $request_tools)
                  (if (not (empty-string $transformation_error)) (push! &request_messages (user $transformation_error)) _)))
      (println! "BEFORE LLM")
-     (let ($message $finish_reason $response $usage) (llm (get-state &request_messages) (get-state &request_tools))
+     (let ($message $finish_reason $response $usage) (llm (get-state &request_messages) (get-state &request_tools) (MODEL) (MAX_TOKENS))
           (progn (change-state! &message $message)
                  (change-state! &finish_reason $finish_reason)
                  (change-state! &response $response)
@@ -234,7 +239,7 @@
                          (str-cat ("Unknown tool: " $tool_name))
                          (if (== $status notdict)
                              "Tool arguments must be a JSON object"
-                             (invoke_tool (index-atom (car-atom $tool) 1) $arguments)))))
+                             (invoke_tool (index-atom (car-atom $tool) 1) $arguments (DYNAMIC_TIMEOUT))))))
           ($ret (if (> (string_length $ret0) (MAX_TOOL_OUTPUT_CHARS)) (truncate $ret0 (MAX_TOOL_OUTPUT_CHARS)) $ret0)))
          (progn (push! &experience (tool $id (step $ret)))
                 (push! &tool_outputs (str-cat ("tool call: " $tool_name " " $tool_arguments "\ntool return: " $ret))))))
