@@ -25,5 +25,7 @@ Example use cases:
 #MODULES:
 Each call runs in a fresh CeTTa process with utils.metta loaded, so its helpers (str-cat, text, ...) and CeTTa's json, str, fs, system, proc and io libraries are available: call json:parse, fs:read-text, fs:write, str:trim, ... directly. Other libraries are imported with !(import! &self (library NAME)).
 A process that a module starts with proc:run should have the option (lifetime owner), so that it ends with the call.
+#PYTHON MODULES:
+A tool, channel or transformation may instead be a .py file in the same folder, in the format of Python Iter: a tool defines DESCRIPTION = "..." and run(a, b); a channel defines receive() and optionally send(content); a transformation defines DESCRIPTION and transform(messages, tools), whose messages and tools are lists and dicts and which returns (messages, tools). A Python module runs in the call's own Python. Raising an exception fails the call. The python tool runs Python code with the other Python tools callable by name.
 #LESSONS:
 If name starts with underline, it is not considered. Can be used to de-activate items.

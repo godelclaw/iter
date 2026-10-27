@@ -99,6 +99,14 @@
             (json:stringify (JsonObject ((JsonPair "ok" false)
                                          (JsonPair "error" (str-cat ("Result serialization failed: " (index-atom $json (- (size-atom $json) 1)))))))))))
 
-!(let* (($request (json:parse (fs:read-text (car-atom (system:args)))))
-        ($outcome (collapse (once (worker:serve $request)))))
-   (fs:write (json:get $request "result") (worker:json (worker:outcome $outcome))))
+;; A Python module runs in this process's Python, which writes the result.
+(= (worker:python $request_file)
+   (let $helper (import! &self iter_python.py)
+        (py-call (iter_python.invoke $request_file))))
+
+!(let* (($request_file (car-atom (system:args)))
+        ($request (json:parse (fs:read-text $request_file))))
+   (if (str:ends-with (json:get $request "module") ".py")
+       (worker:python $request_file)
+       (let $outcome (collapse (once (worker:serve $request)))
+            (fs:write (json:get $request "result") (worker:json (worker:outcome $outcome))))))

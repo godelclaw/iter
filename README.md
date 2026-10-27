@@ -12,9 +12,13 @@ libraries. The loop is Patrick's.
 - **Tools, channels and transformations** are `.metta` modules.
   `iter_worker.metta` runs each call in a CeTTa process of its own, which a
   timeout kills.
-- **Tools:** send, nop, shell and metta. The python tool is not ported.
+- **Tools:** send, nop, shell, metta and python.
 - **Channels:** the terminal, and `_example.metta`, a channel that runs its own
   daemon.
+- **Python modules.** A tool, channel or transformation may also be a `.py`
+  file in Python Iter's format, so Python tools from the Python version work
+  unchanged. The worker runs them in its own embedded Python through `py-call`
+  and `iter_python.py`, which needs a CeTTa build with Python (`BUILD=python`).
 
 The module formats, which the agent uses to extend itself, are in
 `reprogramming.txt`.
@@ -25,7 +29,9 @@ Use a Linux build of CeTTa with HTTP (`make ENABLE_HTTP=1`), which places
 `cetta.proc-scope` beside the binary. It needs `system:executable`,
 `system:read-line` with a timeout, the process library's `inherit` and `null`
 standard streams and its `run` and `detached` lifetimes, and `fs:lock`'s
-`exclusive-nowait`. Configure the model as upstream does:
+`exclusive-nowait`. Python modules also need a Python build (`BUILD=python`)
+whose `py-call` returns Python text as strings. Configure the model as upstream
+does:
 
 ```sh
 export LLM_MODEL=... BASE_URL=... AI_API_KEY=...

@@ -50,22 +50,24 @@
 (= (object-without (JsonObject $pairs) $keys)
    (JsonObject (filter-atom $pairs $pair (let (JsonPair $name $value) $pair (not (is-member $name $keys))))))
 
-;; Path(path).stem of a module: its file name without .metta
+;; Path(path).stem of a module: its file name without .metta or .py
 (= (module-name $path)
    (let* (($parts (str:split "/" $path))
           ($name (index-atom $parts (- (size-atom $parts) 1))))
-     (if (str:ends-with $name ".metta") (str:char-slice $name 0 (- (str:char-length $name) 6)) $name)))
+     (if (str:ends-with $name ".metta") (str:char-slice $name 0 (- (str:char-length $name) 6))
+         (if (str:ends-with $name ".py") (str:char-slice $name 0 (- (str:char-length $name) 3)) $name))))
 
 (= (is-directory $path)
    (case (fs:metadata $path follow)
      (((fs:info directory $size $identity) true)
       ($other false))))
 
-;; sorted .metta modules of a directory, without names beginning with _
+;; sorted .metta and .py modules of a directory, without names beginning with _
 (= (module-files $dir)
    (if (is-directory $dir)
        (map-atom (sort-atom (filter-atom (fs:entries $dir) $name
-                                         (and (str:ends-with $name ".metta") (not (str:starts-with $name "_")))))
+                                         (and (or (str:ends-with $name ".metta") (str:ends-with $name ".py"))
+                                              (not (str:starts-with $name "_")))))
                  $name (str-cat ($dir "/" $name)))
        ()))
 

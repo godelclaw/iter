@@ -75,6 +75,23 @@
        ("s" "[stamp]"))
 !(test (call "tests/fixtures/refuse.metta" "transform" ((one-message) (JsonArray ())) (no-kwargs)) (error "transform: refused"))
 
+;; Python modules, in the format of Python Iter, run in the worker's Python
+!(test (json:get (metadata "tools/python.py") "parameters") (JsonArray ("code")))
+!(test (run-tool "tools/python.py" (kwargs1 "code" "print(6 * 7)")) (ok "42\n"))
+!(test (run-tool "tests/fixtures/pyerror.py" (no-kwargs)) (error "ValueError: the widget is missing"))
+!(test (call "tests/fixtures/pychannel.py" "receive" () (no-kwargs)) (ok "from python"))
+!(test (case (call "tests/fixtures/pystamp.py" "transform" ((one-message) (JsonArray ())) (no-kwargs))
+             (((ok (JsonArray ($messages $tools))) (contents $messages))))
+       ("s" "[py stamp]"))
+;; the send tool reaches a Python channel; the channel's name keeps it out of
+;; the loop's channels
+!(test (let* ((() (fs:write "channels/_pytest_channel.py" (fs:read-text "tests/fixtures/pychannel.py")))
+              ($sent (run-tool "tools/send.metta" (kwargs2 "channel" "_pytest_channel" "content" "to python")))
+              ($seen (fs:read-text ".runtime/pychannel-sent"))
+              ($cleaned (progn (fs:remove "channels/_pytest_channel.py") (fs:remove ".runtime/pychannel-sent"))))
+         ($sent $seen))
+       ((ok "SUCCESS") "to python"))
+
 ;; a call past its time is killed with everything it started
 !(test (invoke_dynamic "tools/shell.metta" "run" () (kwargs1 "cmd" "sleep 31.7 & sleep 32.9") 1) (error "TIMEOUT after 1s"))
 !(test (progn (sleep 0.2) (running "^sleep 3[12][.][79]$")) false)
@@ -116,7 +133,7 @@
        (("tests/fixtures/texts/notes.txt" "goal: learn") ("tests/fixtures/texts/sub/deep.txt" "deep fact") ("tests/fixtures/texts/sub-b.txt" "a-b")))
 
 ;; modules
-!(test (module-files "tools") ("tools/metta.metta" "tools/nop.metta" "tools/send.metta" "tools/shell.metta"))
+!(test (module-files "tools") ("tools/metta.metta" "tools/nop.metta" "tools/python.py" "tools/send.metta" "tools/shell.metta"))
 !(test (module-name "channels/_example.metta") "_example")
 
 ;; the model call: its request, its answer, and a failed call as a value
