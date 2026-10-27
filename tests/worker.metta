@@ -36,6 +36,14 @@
 ;; the metta tool evaluates in a CeTTa process of its own, with NAL loaded
 !(test (run-tool "tools/metta.metta" (kwargs1 "code" "!(Truth_Deduction (stv 1.0 0.9) (stv 1.0 0.9))")) (ok "true\ntrue\n(stv 1.0 0.81)\n"))
 !(test (run-tool "tools/metta.metta" (kwargs1 "code" "   ")) (ok "No MeTTa code provided"))
+;; a syntax error comes back as the evaluation's error output, and an evaluation
+;; past the worker's time ends with it
+!(test (case (run-tool "tools/metta.metta" (kwargs1 "code" "!(+ 1"))
+             (((ok $output) (str:starts-with $output "\n[STDERR]\n"))
+              ($other $other)))
+       true)
+!(test (invoke_dynamic "tools/metta.metta" "run" () (kwargs1 "code" "(= (spin $n) (spin (+ $n 1))) ;spin-sentinel-4711\n!(spin 0)") 1) (error "TIMEOUT after 1s"))
+!(test (progn (sleep 0.3) (running "spin-sentinel-4711")) false)
 
 ;; send goes through a channel module; the terminal's line goes to standard output
 !(test (run-tool "tools/send.metta" (kwargs2 "channel" "terminal" "content" "hi")) (ok "SUCCESS"))

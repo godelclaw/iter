@@ -1,6 +1,6 @@
-;; The metta tool on CeTTa: the code runs in a CeTTa process of its own, after
-;; the NAL and PLN libraries, with each metta/NAME.metta loaded into &NAME.
-;; That process belongs to this worker and ends with it.
+;; The metta tool on CeTTa: the code runs inline in a CeTTa process of its own,
+;; after the NAL and PLN libraries, with each metta/NAME.metta loaded into
+;; &NAME. That process belongs to this worker and ends with it.
 (= (description) "Evaluate MeTTa code with CeTTa. Pass multi-line MeTTa code as a string.")
 (= (parameters) (code))
 
@@ -20,13 +20,9 @@
    (let $source (str:trim $code)
         (if (== $source "")
             "No MeTTa code provided"
-            (let* (($file (runtime-file ".metta"))
-                   (() (fs:write $file (str:concat (metta:imports) $source)))
-                   ($result (proc:run ((cetta) "--lang" "petta" $file) ((timeout-ms 30000) (lifetime owner))))
-                   ($removed (fs:remove $file)))
-              (case $result
-                (((proc:result $termination proc:timed-out $out $err $capture) "Timeout: MeTTa evaluation took longer than 30 seconds")
-                 ((proc:result (proc:launch-failed $errno $stage) $cause $out $err $capture)
-                  (str-cat ("Error: could not start CeTTa (" $stage ", errno " $errno ")")))
-                 ((proc:result $termination $cause $out $err $capture) (metta:output $out $err))
-                 ((proc:failed $kind $reason) (str:concat "Error: " $reason))))))))
+            (case (proc:run ((cetta) "--lang" "petta" "-e" (str:concat (metta:imports) $source)) ((timeout-ms 30000) (lifetime owner)))
+              (((proc:result $termination proc:timed-out $out $err $capture) "Timeout: MeTTa evaluation took longer than 30 seconds")
+               ((proc:result (proc:launch-failed $errno $stage) $cause $out $err $capture)
+                (str-cat ("Error: could not start CeTTa (" $stage ", errno " $errno ")")))
+               ((proc:result $termination $cause $out $err $capture) (metta:output $out $err))
+               ((proc:failed $kind $reason) (str:concat "Error: " $reason)))))))
