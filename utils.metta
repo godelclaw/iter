@@ -1,7 +1,8 @@
 ;; utils.metta: the helpers of Iter's utils.py ported to MeTTa (PeTTa).
 ;; All configuration lives in iter.metta and is passed in as function arguments.
-;; The model call is iter_llm.metta, over CeTTa's native HTTP. Only dynamic_worker
-;; (the "--invoke" subprocess that loads tools/channels/transformations) stays in utils.py.
+;; No Python: the model call is iter_llm.metta (native HTTP), and tools, channels
+;; and transformations are MeTTa modules run by iter_worker.metta, one CeTTa
+;; process per call.
 ;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant "<json>") (raw "<json>")
 ;; JSON values are SWI-Prolog json terms: objects json([key=value, ...]) keep their key order, arrays are lists, strings are strings.
 
@@ -39,11 +40,11 @@
           (translatePredicate (close $stream))
           true))
 
-;; sorted(Path(dir).glob("*.py")) without names beginning with _
-(= (python-files $dir)
+;; sorted .metta modules of a directory, without names beginning with _
+(= (module-files $dir)
    (if (directory-exists $dir)
        (map-atom (sort-atom (filter-atom (directory_files $dir) $name
-                                         (and (succeeds (collapse (progn (translatePredicate (file_name_extension $base py $name)) yes)))
+                                         (and (succeeds (collapse (progn (translatePredicate (file_name_extension $base metta $name)) yes)))
                                               (not (starts-with-underscore $name)))))
                  $name (atomics_to_string ($dir "/" $name)))
        ()))
@@ -79,7 +80,7 @@
 (= (json-delete $object $key) (json-object (filter-atom (json-pairs $object) $pair (not (== (json-pair-key $pair) $key)))))
 
 ;; --------------------------------------------------------------------
-;; 1. Dynamic execution (python3 utils.py --invoke path function result_file payload_file):
+;; 1. Dynamic execution (cetta iter_worker.metta, the request file in ITER_WORKER_REQUEST):
 ;; --------------------------------------------------------------------
 (= (temp-file $content)
    (progn (translatePredicate (tmp_file_stream utf8 $file $stream))
@@ -94,10 +95,19 @@
             (progn (translatePredicate (sleep $delay))
                    (wait-worker $pid $deadline (min 0.05 (* 2 $delay))))
             $status)))
+;; A detached worker leads its own session. Native tools start their children in
+;; process groups of their own, which the group kill misses: whatever is left in
+;; the session goes too. A daemon that should outlive its worker starts a session.
+(= (kill-session $sid)
+   (collapse (catch (once (progn (translatePredicate (process_create (Predicate (path pkill))
+                                                                     (cons-atom "-KILL" (cons-atom "-s" (cons-atom (atomics_to_string ($sid)) ())))
+                                                                     ((Predicate (stdout null)) (Predicate (stderr null)))))
+                                 true)))))
 (= (kill-worker $pid $inherit_stdin)
    (progn (collapse (catch (once (progn (if $inherit_stdin
                                             (translatePredicate (process_kill $pid 9))
-                                            (translatePredicate (process_group_kill $pid 9)))
+                                            (progn (translatePredicate (process_group_kill $pid 9))
+                                                   (kill-session $pid)))
                                         true))))
           (translatePredicate (process_wait $pid $status))
           true))
@@ -113,11 +123,12 @@
        ((Predicate (stdin null)) (Predicate (stdout null)) (Predicate (stderr null)) (Predicate (detached true)))))
 
 (= (run-worker $path $function $result_file $payload_file $inherit_stdin $timeout)
-   (let* (($utils_py (progn (translatePredicate (absolute_file_name "utils.py" $abs_utils)) $abs_utils))
-          ($dynamic_path (progn (translatePredicate (absolute_file_name $path $abs_path)) $abs_path))
-          ($argv (cons-atom $utils_py (cons-atom "--invoke" (cons-atom $dynamic_path (cons-atom $function (cons-atom $result_file (cons-atom $payload_file ())))))))
-          ($options (worker-options $inherit_stdin))
-          ($pid (progn (translatePredicate (process_create (Predicate (path python3)) $argv (cons-atom (Predicate (process $p)) $options))) $p)))
+   (let* (($worker (progn (translatePredicate (absolute_file_name "iter_worker.metta" $abs_worker)) $abs_worker))
+          ($argv (cons-atom "--lang" (cons-atom "petta" (cons-atom "--no-results" (cons-atom $worker ())))))
+          ($request (cons-atom (json-pair ITER_WORKER_REQUEST $payload_file) ()))
+          ($environment (cons-atom (Predicate (environment $request)) (worker-options $inherit_stdin)))
+          ($cetta (progn (translatePredicate (read_link "/proc/self/exe" $link $target)) $target))
+          ($pid (progn (translatePredicate (process_create $cetta $argv (cons-atom (Predicate (process $p)) $environment))) $p)))
      (let $status (wait-worker $pid (+ (current-time) $timeout) 0.005)
                (if (== $status timeout)
                    (progn (kill-worker $pid $inherit_stdin)
@@ -133,7 +144,9 @@
 ;; returns (ok result) or (error "text")
 (= (invoke_dynamic $path $function $args $kwargs $timeout)
    (let* (($result_file (temp-file ""))
-          ($payload_file (temp-file (json-text (json-object ((json-pair args $args) (json-pair kwargs $kwargs))))))
+          ($payload_file (temp-file (json-text (json-object ((json-pair module $path) (json-pair function $function)
+                                                             (json-pair args $args) (json-pair kwargs $kwargs)
+                                                             (json-pair result $result_file))))))
           ($inherit_stdin (and (== (file-stem $path) terminal) (== $function "receive")))
           ($outcome (collapse (catch (once (run-worker $path $function $result_file $payload_file $inherit_stdin $timeout))))))
          (progn (delete-temp-file $result_file)
@@ -191,7 +204,7 @@
              $entry (let $path (index-atom $entry 1)
                          (cons-atom $path (cons-atom (strip (read-text $path)) ())))))
 
-(= (channel_paths) (python-files "channels"))
+(= (channel_paths) (module-files "channels"))
 
 (= (receive_channel $path $timeout)
    (case (invoke_dynamic $path "receive" () (no-kwargs) $timeout)
@@ -210,7 +223,7 @@
 
 ;; returns ((name path description (parameters)) ...) omitted_tools errors
 (= (load_tools $max_tools $max_description_chars $timeout)
-   (let* (($paths (python-files "tools"))
+   (let* (($paths (module-files "tools"))
           ($results (map-atom (first-n $max_tools $paths) $path (tool_metadata $path $max_description_chars $timeout))))
          ((map-atom (filter-atom $results $result (== (car-atom $result) inop)) $result (index-atom $result 1))
           (- (size-atom $paths) $max_tools)
@@ -229,7 +242,7 @@
 (= (native_tools $inops) (json-text (map-atom $inops $inop (native_tool $inop))))
 
 (= (load_transformation_descriptions $timeout)
-   (join-text "\n" (map-atom (python-files "transformations") $path
+   (join-text "\n" (map-atom (module-files "transformations") $path
                              (case (invoke_dynamic $path "__description__" () (no-kwargs) $timeout)
                                    (((ok $description) (atomics_to_string ((file-stem $path) ": " $description)))
                                     ($error (atomics_to_string ((file-stem $path) ": [DESCRIPTION MISSING]"))))))))
@@ -242,7 +255,7 @@
 
 ;; messages as atoms, tools as JSON text
 (= (apply_transformation $messages $tools $timeout)
-   (let ($new_messages $new_tools $errors) (foldl-atom (python-files "transformations")
+   (let ($new_messages $new_tools $errors) (foldl-atom (module-files "transformations")
                                                        ((map-atom $messages $atom (to_message $atom)) (json-parse $tools) ())
                                                        $state $path (transformation_step $state $path $timeout))
         ((map-atom $new_messages $message (from_message $message)) (json-text $new_tools) (join-text "\n" $errors))))
