@@ -1,9 +1,7 @@
 import inspect
 import json
 import sys
-import openai
 import importlib.util
-import uuid
 from pathlib import Path
 
 # --------------------------------------------------------------------
@@ -39,21 +37,3 @@ def dynamic_worker():
 if len(sys.argv) > 1 and sys.argv[1] == "--invoke":
     dynamic_worker()
     sys.exit(0)
-
-# --------------------------------------------------------------------
-# 2. Python API access for utils.metta (imported via pyimport)
-# --------------------------------------------------------------------
-CLIENT = None
-
-def init_client(base_url, api_key, timeout):
-    global CLIENT
-    CLIENT = openai.OpenAI(api_key=str(api_key), base_url=str(base_url), timeout=timeout, max_retries=0, default_headers={"X-APC-Tenant": "iter", "x-session-id": str(uuid.uuid4())})
-    return True
-
-def exception_text(error):
-    return f"{type(error).__name__}: {error}"
-
-def chat_completion(messages, tools, model, max_tokens): #messages and tools as JSON text, returns message_json finish_reason response usage
-    response = CLIENT.chat.completions.create(model=str(model), messages=json.loads(str(messages)), tools=json.loads(str(tools)), tool_choice="required", max_tokens=int(max_tokens), extra_body={ "enable_thinking": True})
-    choice = response.choices[0]
-    return [json.dumps(choice.message.model_dump(exclude_none=True), ensure_ascii=False), str(choice.finish_reason), str(response), str(response.usage)]

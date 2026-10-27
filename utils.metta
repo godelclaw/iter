@@ -1,15 +1,12 @@
 ;; utils.metta: the helpers of Iter's utils.py ported to MeTTa (PeTTa).
 ;; All configuration lives in iter.metta and is passed in as function arguments.
-;; Only what needs Python stays in utils.py, imported via pyimport of petta_lib_easypy:
-;;   dynamic_worker (the "--invoke" subprocess that loads tools/channels/transformations),
-;;   init_client and chat_completion (OpenAI API), exception_text (Python exception objects).
+;; The model call is iter_llm.metta, over CeTTa's native HTTP. Only dynamic_worker
+;; (the "--invoke" subprocess that loads tools/channels/transformations) stays in utils.py.
 ;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant "<json>") (raw "<json>")
 ;; JSON values are SWI-Prolog json terms: objects json([key=value, ...]) keep their key order, arrays are lists, strings are strings.
 
 !(import! &self (library lib_import))
-!(git-import! "https://github.com/patham9/petta_lib_easypy.git")
-!(import! &self (library petta_lib_easypy lib_easypy))
-!(pyimport utils.py)
+!(import! &self iter_llm)
 !(use-module! http/json)
 !(use-module! process)
 !(use-module! filesex)

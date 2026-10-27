@@ -1,5 +1,5 @@
 ;; Iter main loop ("# 4. Main loop" of the original iter.py) in MeTTa (PeTTa).
-;; utils.metta provides the helpers (dynamic execution, JSON, file listing), the OpenAI client stays in utils.py.
+;; utils.metta provides the helpers (dynamic execution, JSON, file listing), iter_llm.metta the model call.
 ;; All configuration is here and passed onward to the utils functions as arguments.
 ;; Python variables of the loop are MeTTa states with the same names (&experience, &post_task_mode, ...).
 ;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant "<json>") (raw "<json>")
