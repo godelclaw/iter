@@ -89,7 +89,7 @@
 (= (worker-options $path $function $kwargs $timeout)
    (cons-atom (timeout-ms (round-math (* $timeout 1000)))
               (if (and (== (module-name $path) "terminal") (== $function "receive"))
-                  ((stdin inherit) (stdout null) (stderr null))
+                  ((stdin inherit) (group caller) (stdout null) (stderr null))
                   (if (== (json:get $kwargs "channel") "terminal")
                       ((stdout inherit) (stderr null))
                       ((stdout null) (stderr null))))))
