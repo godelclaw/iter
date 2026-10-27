@@ -1,6 +1,7 @@
 #CHANNELS:
 Communication channels are hot-reloaded from channels/*.metta and define (receive) and optionally (send $content).
 If a channel needs persistent connections or state, it can launch itself as an external daemon/process; see channels/_example.metta.
+channels/irc.metta is a native TCP/TLS example with locked retry/activity state and atomic spools. Its pending/uncertain/written files distinguish queued requests from uncertain effects and completed local writes, never server delivery; uncertain originals must not be replayed automatically. See README.md for its configuration and local qualification boundaries.
 #TOOLS:
 You can create tools as .metta files in ./tools/. New tools are available in the next agent cycle. Format:
 (= (description) "How the tool should be described")

@@ -1,0 +1,11 @@
+;; Destination is reserved, bound without listening, by the local harness.
+!(import! &self "../utils.metta")
+!(import! &self "../channels/irc.metta")
+!(change-state! &irc:connection none)
+!(change-state! &irc:reader none)
+!(test (irc:config-ok) true)
+!(test (irc:connect (irc:url)) false)
+!(test (get-state &irc:connection) none)
+!(test (get-state &irc:reader) none)
+!(irc:close)
+!(test (get-state &irc:connection) none)
