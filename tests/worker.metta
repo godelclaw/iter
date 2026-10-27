@@ -127,5 +127,8 @@
        (JsonObject ((JsonPair "model" "m") (JsonPair "messages" (JsonArray ())) (JsonPair "tools" (JsonArray ()))
                     (JsonPair "tool_choice" "required") (JsonPair "max_tokens" 7) (JsonPair "enable_thinking" true))))
 !(test (size-atom (str:split "-" (iter-llm:uuid4))) 5)
-!(test (progn (init_client "http://127.0.0.1:9/v1" "k" 5) (chat_completion (JsonArray ()) (JsonArray ()) "m" 7))
+;; nothing listens at the refusal target; a harness that reserves a port of
+;; its own names it in ITER_TEST_REFUSED_URL
+!(test (progn (init_client (system:getenv-or-default "ITER_TEST_REFUSED_URL" "http://127.0.0.1:9/v1") "k" 5)
+              (chat_completion (JsonArray ()) (JsonArray ()) "m" 7))
        (Error "Transport" "Could not connect to server"))
