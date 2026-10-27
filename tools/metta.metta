@@ -1,40 +1,32 @@
 ;; The metta tool on CeTTa: the code runs in a CeTTa process of its own, after
 ;; the NAL and PLN libraries, with each metta/NAME.metta loaded into &NAME.
-!(import! &self (library proc))
-!(import! &self (library str))
-
+;; That process belongs to this worker and ends with it.
 (= (description) "Evaluate MeTTa code with CeTTa. Pass multi-line MeTTa code as a string.")
 (= (parameters) (code))
 
-(= (metta:absolute $path) (progn (translatePredicate (absolute_file_name $path $absolute)) (text_to_string $absolute)))
-(= (metta:import $space $path) (atomics_to_string ("!(import! " $space " \"" (metta:absolute $path) "\")\n")))
+(= (metta:import $space $path)
+   (str-cat ("!(import! " $space " \"" (str:escape metta (fs:canonical-path $path)) "\")\n")))
 
 (= (metta:imports)
-   (atomics_to_string ("!(import! &self (library lib_pln))\n"
-                       (if (file-exists "lib_nal.metta") (metta:import "&self" "lib_nal.metta") "")
-                       (join-text "" (map-atom (module-files "metta") $path
-                                               (metta:import (atomics_to_string ("&" (file-stem $path))) $path))))))
-
-(= (metta:source-file $text)
-   (progn (translatePredicate (tmp_file_stream $file $stream ((Predicate (extension metta)) (Predicate (encoding utf8)))))
-          (translatePredicate (write $stream $text))
-          (translatePredicate (close $stream))
-          (text_to_string $file)))
+   (str-cat ("!(import! &self (library lib_pln))\n"
+             (if (fs:is-file "lib_nal.metta") (metta:import "&self" "lib_nal.metta") "")
+             (str:join "" (map-atom (module-files "metta") $path (metta:import (str:concat "&" (module-name $path)) $path))))))
 
 (= (metta:output $out $err)
    (let $output (if (== $err "") $out (str:concat $out (str:concat "\n[STDERR]\n" $err)))
-        (if (== (strip $output) "") "(no output)" $output)))
+        (if (== (str:trim $output) "") "(no output)" $output)))
 
 (= (run $code)
-   (let $source (strip $code)
+   (let $source (str:trim $code)
         (if (== $source "")
             "No MeTTa code provided"
-            (let* (($file (metta:source-file (str:concat (metta:imports) $source)))
-                   ($cetta (progn (translatePredicate (read_link "/proc/self/exe" $link $target)) (text_to_string $target)))
-                   ($result (proc:run (cons-atom $cetta (cons-atom "--lang" (cons-atom "petta" (cons-atom $file ())))) ((timeout-ms 30000))))
-                   ($removed (delete-temp-file $file)))
+            (let* (($file (runtime-file ".metta"))
+                   (() (fs:write $file (str:concat (metta:imports) $source)))
+                   ($result (proc:run ((cetta) "--lang" "petta" $file) ((timeout-ms 30000) (lifetime owner))))
+                   ($removed (fs:remove $file)))
               (case $result
-                    (((proc:result $status proc:timed-out $out $err $capture) "Timeout: MeTTa evaluation took longer than 30 seconds")
-                     ((proc:result (proc:launch-failed $errno $stage) $ending $out $err $capture)
-                      (atomics_to_string ("Error: could not start CeTTa (" $stage ", errno " $errno ")")))
-                     ((proc:result $status $ending $out $err $capture) (metta:output $out $err))))))))
+                (((proc:result $termination proc:timed-out $out $err $capture) "Timeout: MeTTa evaluation took longer than 30 seconds")
+                 ((proc:result (proc:launch-failed $errno $stage) $cause $out $err $capture)
+                  (str-cat ("Error: could not start CeTTa (" $stage ", errno " $errno ")")))
+                 ((proc:result $termination $cause $out $err $capture) (metta:output $out $err))
+                 ((proc:failed $kind $reason) (str:concat "Error: " $reason))))))))

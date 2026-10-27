@@ -1,3 +1,3 @@
 (= (description) "Appends a stamp message.")
-(= (transform $messages $tools)
-   ((append $messages (cons-atom (json-object ((json-pair role "user") (json-pair content "[stamp]"))) ())) $tools))
+(= (transform (JsonArray $messages) $tools)
+   ((JsonArray (append $messages ((JsonObject ((JsonPair "role" "user") (JsonPair "content" "[stamp]")))))) $tools))

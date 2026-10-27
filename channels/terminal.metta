@@ -1,12 +1,12 @@
 ;; The terminal. receive answers the lines waiting on standard input, or "";
-;; lines typed together arrive together.
+;; lines typed together arrive together. send writes a line to standard
+;; output. The loop runs both on its own standard input and output.
 (= (terminal:lines)
-   (let $ready (progn (translatePredicate (wait_for_input ((Predicate user_input)) $streams 0.0)) $streams)
-        (if (== $ready ())
-            ()
-            (let $line (progn (translatePredicate (read_line_to_string user_input $read)) $read)
-                 (if (== $line end_of_file) () (cons-atom $line (terminal:lines)))))))
+   (case (system:read-line 0)
+     ((() ())
+      (end_of_file ())
+      ($line (if (is-string $line) (cons-atom $line (terminal:lines)) ())))))
 
-(= (receive) (strip (join-text "\n" (terminal:lines))))
+(= (receive) (str:trim (str:join "\n" (terminal:lines))))
 
-(= (send $content) (progn (translatePredicate (writeln $content)) true))
+(= (send $content) (system:write stdout (str:concat (text $content) "\n")))

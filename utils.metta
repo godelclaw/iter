@@ -1,303 +1,302 @@
-;; utils.metta: the helpers of Iter's utils.py ported to MeTTa (PeTTa).
-;; All configuration lives in iter.metta and is passed in as function arguments.
-;; No Python: the model call is iter_llm.metta (native HTTP), and tools, channels
-;; and transformations are MeTTa modules run by iter_worker.metta, one CeTTa
+;; utils.metta: the helpers of Iter's utils.py ported to MeTTa (PeTTa), on
+;; CeTTa's native libraries. All configuration lives in iter.metta and is
+;; passed in as function arguments.
+;; The model call is iter_llm.metta (native HTTP), and tools, channels and
+;; transformations are MeTTa modules run by iter_worker.metta, one CeTTa
 ;; process per call.
-;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant "<json>") (raw "<json>")
-;; JSON values are SWI-Prolog json terms: objects json([key=value, ...]) keep their key order, arrays are lists, strings are strings.
+;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant <json>) (raw <json>)
+;; JSON values are CeTTa's: (JsonObject ((JsonPair "key" value) ...)) keeps its key order, (JsonArray (...)),
+;; JsonNull, strings, numbers, true and false.
 
-!(import! &self (library lib_import))
+!(import! &self (library json))
+!(import! &self (library str))
+!(import! &self (library fs))
+!(import! &self (library system))
+!(import! &self (library proc))
+!(import! &self (library io))
 !(import! &self iter_llm)
-!(use-module! http/json)
-!(use-module! process)
-!(use-module! filesex)
-!(import_prolog_function atomics_to_string)
-!(import_prolog_function atomic_list_concat)
-!(import_prolog_function text_to_string)
-!(import_prolog_function directory_files)
-!(import_prolog_function string_length)
-!(import_prolog_function sub_string)
 
 ;; --------------------------------------------------------------------
 ;; Small helpers
 ;; --------------------------------------------------------------------
-(= (succeeds $goal_result) (not (== $goal_result ())))
-(= (is-string $x) (succeeds (collapse (progn (translatePredicate (string $x)) yes))))
-(= (string-to-atom $s) (progn (translatePredicate (atom_string $atom $s)) $atom))
-(= (join-text $sep $list) (text_to_string (atomic_list_concat $list $sep)))
-(= (strip $s) (progn (translatePredicate (split_string $s "" " \t\n\r" $parts)) (car-atom $parts)))
+;; str() of Python: a string itself, any other atom as MeTTa writes it
+(= (text $atom) (format-args "{}" (cons-atom $atom ())))
+(= (str-cat $parts) (str:join "" (map-atom $parts $part (text $part))))
+(= (is-string $atom) (== (get-type $atom) String))
 (= (first-n $n $list) (if (or (<= $n 0) (== $list ())) () (cons-atom (car-atom $list) (first-n (- $n 1) (cdr-atom $list)))))
-(= (starts-with-underscore $name) (succeeds (collapse (progn (translatePredicate (string_concat "_" $rest $name)) yes))))
-(= (file-exists $path) (succeeds (collapse (progn (translatePredicate (exists_file $path)) yes))))
-(= (directory-exists $path) (succeeds (collapse (progn (translatePredicate (exists_directory $path)) yes))))
-(= (file-stem $path) (progn (translatePredicate (file_base_name $path $base)) (translatePredicate (file_name_extension $stem $ext $base)) $stem))
-(= (path-parts $path) (progn (translatePredicate (split_string $path "/" "" $parts)) $parts))
-(= (getenv-default $name $default) (let $r (collapse (progn (translatePredicate (getenv $name $value)) $value)) (if (== $r ()) $default (text_to_string (car-atom $r)))))
-(= (read-text $path) (progn (translatePredicate (read_file_to_string $path $text ((Predicate (encoding utf8))))) $text))
-(= (write-text $path $text)
-   (progn (translatePredicate (open $path write $stream ((Predicate (encoding utf8)))))
-          (translatePredicate (write $stream $text))
-          (translatePredicate (close $stream))
-          true))
+
+;; "what: why" of an (Error what why), as Python printed an exception
+(= (error_text $error)
+   (case $error
+     (((Error $what $why) (str:concat (text $what) (str:concat ": " (text $why))))
+      ($other (repr $other)))))
+
+;; time.sleep: an io timer, waited for until it fires
+(= (sleep $seconds)
+   (let (io:pending $timer) (io:submit (timer:after (round-math (* $seconds 1000))))
+        (timer-fired $timer)))
+(= (timer-fired $timer)
+   (case (io:wait $timer 1000)
+     (((io:idle) (timer-fired $timer))
+      ($fired true))))
+
+;; JSON objects as Python's dicts: the keys, a key set in place or appended,
+;; and keys removed
+(= (object-keys (JsonObject $pairs)) (map-atom $pairs $pair (let (JsonPair $key $value) $pair $key)))
+(= (object-put (JsonObject $pairs) $key $value)
+   (JsonObject (if (is-member $key (object-keys (JsonObject $pairs)))
+                   (map-atom $pairs $pair (let (JsonPair $name $old) $pair (if (== $name $key) (JsonPair $key $value) $pair)))
+                   (append $pairs ((JsonPair $key $value))))))
+(= (object-without (JsonObject $pairs) $keys)
+   (JsonObject (filter-atom $pairs $pair (let (JsonPair $name $value) $pair (not (is-member $name $keys))))))
+
+;; Path(path).stem of a module: its file name without .metta
+(= (module-name $path)
+   (let* (($parts (str:split "/" $path))
+          ($name (index-atom $parts (- (size-atom $parts) 1))))
+     (if (str:ends-with $name ".metta") (str:char-slice $name 0 (- (str:char-length $name) 6)) $name)))
+
+(= (is-directory $path)
+   (case (fs:metadata $path follow)
+     (((fs:info directory $size $identity) true)
+      ($other false))))
 
 ;; sorted .metta modules of a directory, without names beginning with _
 (= (module-files $dir)
-   (if (directory-exists $dir)
-       (map-atom (sort-atom (filter-atom (directory_files $dir) $name
-                                         (and (succeeds (collapse (progn (translatePredicate (file_name_extension $base metta $name)) yes)))
-                                              (not (starts-with-underscore $name)))))
-                 $name (atomics_to_string ($dir "/" $name)))
+   (if (is-directory $dir)
+       (map-atom (sort-atom (filter-atom (fs:entries $dir) $name
+                                         (and (str:ends-with $name ".metta") (not (str:starts-with $name "_")))))
+                 $name (str-cat ($dir "/" $name)))
        ()))
 
 ;; --------------------------------------------------------------------
-;; JSON
+;; 1. Dynamic execution (cetta iter_worker.metta REQUEST_FILE):
 ;; --------------------------------------------------------------------
-(= (json-options) ((Predicate (value_string_as string)) (Predicate (null null)) (Predicate (true true)) (Predicate (false false))))
-(= (json-parse $text)
-   (progn (translatePredicate (open_string $text $stream))
-          (translatePredicate (json_read $stream $term (json-options)))
-          (translatePredicate (read_string $stream $length $rest))
-          (translatePredicate (close $stream))
-          (if (== (strip $rest) "") $term (progn (translatePredicate (syntax_error json_extra_data)) $term))))
-(= (json-text $term) (progn (translatePredicate (atom_json_term $text $term (cons-atom (Predicate (as string)) (cons-atom (Predicate (width 0)) (json-options))))) $text))
-(= (json-text-indented $term) (progn (translatePredicate (atom_json_term $text $term (cons-atom (Predicate (as string)) (json-options)))) $text))
-(= (json-term $list) (progn (translatePredicate (=.. $term $list)) $term))
-(= (json-list $term) (progn (translatePredicate (=.. $term $list)) $list))
-(= (json-pair $key $value) (json-term (cons-atom = (cons-atom $key (cons-atom $value ())))))
-(= (json-pair-key $pair) (index-atom (json-list $pair) 1))
-(= (json-pair-value $pair) (index-atom (json-list $pair) 2))
-(= (json-object $pairs) (json-term (cons-atom json (cons-atom $pairs ()))))
-(= (json-pairs $object) (index-atom (json-list $object) 1))
-(= (json-is-object $value) (let $list (json-list $value) (and (== (car-atom $list) json) (== (size-atom $list) 2))))
-(= (json-keys $object) (map-atom (json-pairs $object) $pair (json-pair-key $pair)))
-(= (json-get $object $key $default)
-   (let $found (filter-atom (json-pairs $object) $pair (== (json-pair-key $pair) $key))
-        (if (== $found ()) $default (json-pair-value (car-atom $found)))))
-(= (json-put $object $key $value)
-   (json-object (if (is-member $key (json-keys $object))
-                    (map-atom (json-pairs $object) $pair (if (== (json-pair-key $pair) $key) (json-pair $key $value) $pair))
-                    (append (json-pairs $object) (cons-atom (json-pair $key $value) ())))))
-(= (json-delete $object $key) (json-object (filter-atom (json-pairs $object) $pair (not (== (json-pair-key $pair) $key)))))
+;; the running CeTTa, to start workers and nested evaluations with
+(= (cetta) (system:executable))
 
-;; --------------------------------------------------------------------
-;; 1. Dynamic execution (cetta iter_worker.metta, the request file in ITER_WORKER_REQUEST):
-;; --------------------------------------------------------------------
-(= (temp-file $content)
-   (progn (translatePredicate (tmp_file_stream utf8 $file $stream))
-          (translatePredicate (write $stream $content))
-          (translatePredicate (close $stream))
-          $file))
-(= (delete-temp-file $file) (collapse (catch (once (progn (translatePredicate (delete_file $file)) true)))))
-(= (process-status $pid) (progn (translatePredicate (process_wait $pid $status ((Predicate (timeout 0))))) $status))
-(= (wait-worker $pid $deadline $delay)
-   (let $status (process-status $pid)
-        (if (and (== $status timeout) (< (current-time) $deadline))
-            (progn (translatePredicate (sleep $delay))
-                   (wait-worker $pid $deadline (min 0.05 (* 2 $delay))))
-            $status)))
-;; A detached worker leads its own session. Native tools start their children in
-;; process groups of their own, which the group kill misses: whatever is left in
-;; the session goes too. A daemon that should outlive its worker starts a session.
-(= (kill-session $sid)
-   (collapse (catch (once (progn (translatePredicate (process_create (Predicate (path pkill))
-                                                                     (cons-atom "-KILL" (cons-atom "-s" (cons-atom (atomics_to_string ($sid)) ())))
-                                                                     ((Predicate (stdout null)) (Predicate (stderr null)))))
-                                 true)))))
-(= (kill-worker $pid $inherit_stdin)
-   (progn (collapse (catch (once (progn (if $inherit_stdin
-                                            (translatePredicate (process_kill $pid 9))
-                                            (progn (translatePredicate (process_group_kill $pid 9))
-                                                   (kill-session $pid)))
-                                        true))))
-          (translatePredicate (process_wait $pid $status))
-          true))
-(= (exit-code $status)
-   (case (json-list $status)
-         (((exit $code) $code)
-          ((killed $signal) (- 0 $signal))
-          ($other (repr $status)))))
+;; a fresh file in the loop's private directory .runtime/
+(= (runtime-file $suffix)
+   (let () (fs:make-directories ".runtime" 448)
+        (str-cat ((fs:canonical-path ".runtime") "/" (system:uuid4-hex) $suffix))))
 
-(= (worker-options $inherit_stdin)
-   (if $inherit_stdin
-       ((Predicate (stdin std)) (Predicate (stdout null)) (Predicate (stderr null)))
-       ((Predicate (stdin null)) (Predicate (stdout null)) (Predicate (stderr null)) (Predicate (detached true)))))
+;; A worker's output is discarded, and a timeout kills its process group. The
+;; terminal is the loop's: its receive reads the loop's standard input, from
+;; the loop's process group so that it can read a terminal, and a call that
+;; sends to the terminal writes to the loop's standard output.
+(= (worker-options $path $function $kwargs $timeout)
+   (cons-atom (timeout-ms (round-math (* $timeout 1000)))
+              (if (and (== (module-name $path) "terminal") (== $function "receive"))
+                  ((stdin inherit) (stdout null) (stderr null))
+                  (if (== (json:get $kwargs "channel") "terminal")
+                      ((stdout inherit) (stderr null))
+                      ((stdout null) (stderr null))))))
 
-(= (run-worker $path $function $result_file $payload_file $inherit_stdin $timeout)
-   (let* (($worker (progn (translatePredicate (absolute_file_name "iter_worker.metta" $abs_worker)) $abs_worker))
-          ($argv (cons-atom "--lang" (cons-atom "petta" (cons-atom "--no-results" (cons-atom $worker ())))))
-          ($request (cons-atom (json-pair ITER_WORKER_REQUEST $payload_file) ()))
-          ($environment (cons-atom (Predicate (environment $request)) (worker-options $inherit_stdin)))
-          ($cetta (progn (translatePredicate (read_link "/proc/self/exe" $link $target)) $target))
-          ($pid (progn (translatePredicate (process_create $cetta $argv (cons-atom (Predicate (process $p)) $environment))) $p)))
-     (let $status (wait-worker $pid (+ (current-time) $timeout) 0.005)
-               (if (== $status timeout)
-                   (progn (kill-worker $pid $inherit_stdin)
-                          (error (atomics_to_string ("TIMEOUT after " $timeout "s"))))
-                   (case (collapse (catch (once (json-parse (read-text $result_file)))))
-                         ((((Error $type $context)) (error (atomics_to_string ("Dynamic process exited with code " (exit-code $status) " without a valid result"))))
-                          (((Error $exception)) (error (atomics_to_string ("Dynamic process exited with code " (exit-code $status) " without a valid result"))))
-                          (($output) (if (== (json-get $output ok false) true)
-                                         (ok (json-get $output result null))
-                                         (error (json-get $output error ""))))
-                          ($none (error (atomics_to_string ("Dynamic process exited with code " (exit-code $status) " without a valid result"))))))))))
+;; Popen.returncode: the exit status, or the negated signal
+(= (exit-code $termination)
+   (case $termination
+     (((proc:exited $code) $code)
+      ((proc:signaled $signal) (- 0 $signal))
+      ($other (repr $other)))))
+
+;; the worker's result file: {"ok": true, "result": R} is (ok R), {"ok": false, "error": E} is (error E)
+(= (worker-answer $finished $result_file $timeout)
+   (case $finished
+     (((proc:result (proc:launch-failed $errno $stage) $cause $out $err $capture)
+       (error (str-cat ("cannot start the worker (" $stage ", errno " $errno ")"))))
+      ((proc:result $termination proc:timed-out $out $err $capture)
+       (error (str-cat ("TIMEOUT after " $timeout "s"))))
+      ((proc:result $termination $cause $out $err $capture)
+       (let $output (json:parse (fs:read-text $result_file))
+            (case $output
+              (((JsonObject $pairs) (if (== (json:get $output "ok") true)
+                                        (ok (json:get $output "result"))
+                                        (error (json:get $output "error"))))
+               ($invalid (error (str-cat ("Dynamic process exited with code " (exit-code $termination) " without a valid result"))))))))
+      ((proc:failed $kind $reason)
+       (error (str-cat ("cannot start the worker: " $reason)))))))
+
+(= (run-worker $path $function $args $kwargs $request_file $result_file $timeout)
+   (let $request (json:stringify (JsonObject ((JsonPair "module" $path) (JsonPair "function" $function)
+                                              (JsonPair "args" (JsonArray $args)) (JsonPair "kwargs" $kwargs)
+                                              (JsonPair "result" $result_file))))
+        (case (fs:write $request_file $request)
+          ((() (worker-answer (proc:run ((cetta) "--lang" "petta" "--no-results" (fs:canonical-path "iter_worker.metta") $request_file)
+                                        (worker-options $path $function $kwargs $timeout))
+                              $result_file $timeout))
+           ($failure (error (str-cat ("cannot write the worker request: " $failure))))))))
 
 ;; returns (ok result) or (error "text")
 (= (invoke_dynamic $path $function $args $kwargs $timeout)
-   (let* (($result_file (temp-file ""))
-          ($payload_file (temp-file (json-text (json-object ((json-pair module $path) (json-pair function $function)
-                                                             (json-pair args $args) (json-pair kwargs $kwargs)
-                                                             (json-pair result $result_file))))))
-          ($inherit_stdin (and (== (file-stem $path) terminal) (== $function "receive")))
-          ($outcome (collapse (catch (once (run-worker $path $function $result_file $payload_file $inherit_stdin $timeout))))))
-         (progn (delete-temp-file $result_file)
-                (delete-temp-file $payload_file)
-                (case $outcome
-                      ((((Error $type $context)) (error (repr (Error $type $context))))
-                       (((Error $exception)) (error (repr $exception)))
-                       (($result) $result)
-                       ($none (error "Dynamic execution failed")))))))
+   (let* (($request_file (runtime-file ".json"))
+          ($result_file (runtime-file ".json"))
+          ($outcome (run-worker $path $function $args $kwargs $request_file $result_file $timeout)))
+     (progn (fs:remove $request_file)
+            (fs:remove $result_file)
+            $outcome)))
 
-(= (no-kwargs) (json-object ()))
+(= (no-kwargs) (JsonObject ()))
 
 ;; --------------------------------------------------------------------
 ;; 2. Library for iter.metta
 ;; --------------------------------------------------------------------
 (= (to_message $atom)
    (case $atom
-         (((assistant $message) (json-parse $message))
-          ((raw $message) (json-parse $message))
-          ((tool $id $content) (json-object ((json-pair role "tool") (json-pair tool_call_id $id) (json-pair content $content))))
-          (($role $content) (json-object ((json-pair role (text_to_string $role)) (json-pair content $content)))))))
+     (((assistant $message) $message)
+      ((raw $message) $message)
+      ((tool $id $content) (JsonObject ((JsonPair "role" "tool") (JsonPair "tool_call_id" $id) (JsonPair "content" $content))))
+      (($role $content) (JsonObject ((JsonPair "role" (str:symbol->string $role)) (JsonPair "content" $content)))))))
 
 (= (keys-within $keys $allowed) (== (filter-atom $keys $key (not (is-member $key $allowed))) ()))
-(= (json-str $value) (if (is-string $value) $value (json-text $value)))
+(= (json-str $value) (if (is-string $value) $value (json:stringify $value)))
 
 (= (from_message $message)
-   (let* (($role (json-get $message role null))
-          ($keys (json-keys $message)))
-         (if (and (== $role "tool") (keys-within $keys (role tool_call_id content)))
-             (tool (json-str (json-get $message tool_call_id "")) (json-str (json-get $message content "")))
-             (if (and (or (== $role "user") (== $role "system"))
-                      (and (keys-within $keys (role content)) (is-string (json-get $message content null))))
-                 (cons-atom (string-to-atom $role) (cons-atom (json-get $message content "") ()))
-                 (if (== $role "assistant")
-                     (assistant (json-text $message))
-                     (raw (json-text $message)))))))
+   (let* (($role (json:get $message "role"))
+          ($keys (object-keys $message)))
+     (if (and (== $role "tool") (keys-within $keys ("role" "tool_call_id" "content")))
+         (tool (json-str (json:get $message "tool_call_id")) (json-str (json:get $message "content")))
+         (if (and (or (== $role "user") (== $role "system"))
+                  (and (keys-within $keys ("role" "content")) (is-string (json:get $message "content"))))
+             (cons-atom (str:string->symbol $role) (cons-atom (json:get $message "content") ()))
+             (if (== $role "assistant")
+                 (assistant $message)
+                 (raw $message))))))
 
+;; the saved experience, read as json.load reads it, or the (Error what why)
+;; of a file that holds no JSON array
 (= (load_experience)
-   (if (file-exists "experience.json")
-       (map-atom (json-parse (read-text "experience.json")) $message (from_message $message))
+   (if (fs:is-file "experience.json")
+       (case (json:parse-python (fs:read-text "experience.json"))
+         (((JsonArray $messages) (map-atom $messages $message (from_message $message)))
+          ($other (Error "experience.json" (if (python-json-error $other) (index-atom $other 2) "not a JSON array")))))
        ()))
 
+;; json.dump(experience, file, ensure_ascii=False, indent=2) and os.replace;
+;; a failed write leaves no result
 (= (save_experience $experience)
-   (progn (write-text "experience.tmp" (json-text-indented (map-atom $experience $atom (to_message $atom))))
-          (translatePredicate (rename_file "experience.tmp" "experience.json"))
-          true))
+   (let* ((() (fs:write "experience.tmp" (json:stringify-python-with (JsonArray (map-atom $experience $atom (to_message $atom)))
+                                                                     ((ensure-ascii False) (indent 2)))))
+          (() (fs:rename "experience.tmp" "experience.json")))
+     true))
 
-(= (read_prompt) (strip (read-text "prompt.txt")))
+(= (read_prompt) (str:trim (fs:read-text "prompt.txt")))
 
-;; returns (("memory/path" "content") ...), files with a path part beginning with _ excluded
-(= (memory_files)
-   (map-atom (sort-atom (map-atom (filter-atom (collapse (progn (translatePredicate (directory_member "memory" $file ((Predicate (recursive true)) (Predicate (file_type regular))))) $file))
-                                               $member (not (is-member true (map-atom (cdr-atom (path-parts $member)) $part (starts-with-underscore $part)))))
-                                  $kept (cons-atom (path-parts $kept) (cons-atom (text_to_string $kept) ()))))
-             $entry (let $path (index-atom $entry 1)
-                         (cons-atom $path (cons-atom (strip (read-text $path)) ())))))
+;; the files below a directory as a walk finds them, without those with a
+;; path part beginning with _; symbolic links to directories are not followed
+(= (walk-files $walker)
+   (case (fs:walk-next $walker no-follow ())
+     (((fs:walk-entry $path $relative $name $kind $index)
+       (if (and (fs:is-file $path) (not (is-member true (map-atom (str:split "/" $relative) $part (str:starts-with $part "_")))))
+           (cons-atom $path (walk-files $walker))
+           (walk-files $walker)))
+      ($end ()))))
+
+;; returns (("dir/path" "content") ...), sorted as Python sorts paths, by their parts
+(= (file-texts $directory)
+   (map-atom (sort-atom (map-atom (walk-files (fs:walk-open $directory)) $file ((str:split "/" $file) $file)))
+             $entry (let ($parts $path) $entry ($path (str:trim (fs:read-text $path))))))
+
+(= (memory_files) (file-texts "memory"))
 
 (= (channel_paths) (module-files "channels"))
 
 (= (receive_channel $path $timeout)
    (case (invoke_dynamic $path "receive" () (no-kwargs) $timeout)
-         (((ok $event) (if (or (== $event null) (== $event "")) "" (atomics_to_string ("[" (file-stem $path) "] " $event))))
-          ((error $error) (atomics_to_string ("[CHANNEL ERROR in " $path ": RuntimeError: " $error ". Repair " $path " if needed.]"))))))
+     (((ok $event) (if (or (== $event JsonNull) (== $event "")) "" (str-cat ("[" (module-name $path) "] " $event))))
+      ((error $error) (str-cat ("[CHANNEL ERROR in " $path ": RuntimeError: " $error ". Repair " $path " if needed.]"))))))
 
 (= (limit-description $description $max_description_chars)
-   (if (> (string_length $description) $max_description_chars)
-       (atomics_to_string ((sub_string $description 0 $max_description_chars $_) " [DESCRIPTION TRUNCATED]"))
+   (if (> (str:char-length $description) $max_description_chars)
+       (str:concat (str:char-slice $description 0 $max_description_chars) " [DESCRIPTION TRUNCATED]")
        $description))
 
 (= (tool_metadata $path $max_description_chars $timeout)
    (case (invoke_dynamic $path "__tool_metadata__" () (no-kwargs) $timeout)
-         (((ok $metadata) (inop (cons-atom (file-stem $path) (cons-atom $path (cons-atom (limit-description (json-get $metadata description "") $max_description_chars) (cons-atom (json-get $metadata parameters ()) ()))))))
-          ((error $error) (failed (atomics_to_string ("[TOOL ERROR in " $path ": RuntimeError: " $error ". Repair " $path " if needed.]")))))))
+     (((ok $metadata) (inop (cons-atom (module-name $path)
+                              (cons-atom $path
+                                (cons-atom (limit-description (json:get $metadata "description") $max_description_chars)
+                                  (cons-atom (json:array-items (json:get $metadata "parameters")) ()))))))
+      ((error $error) (failed (str-cat ("[TOOL ERROR in " $path ": RuntimeError: " $error ". Repair " $path " if needed.]")))))))
 
 ;; returns ((name path description (parameters)) ...) omitted_tools errors
 (= (load_tools $max_tools $max_description_chars $timeout)
    (let* (($paths (module-files "tools"))
           ($results (map-atom (first-n $max_tools $paths) $path (tool_metadata $path $max_description_chars $timeout))))
-         ((map-atom (filter-atom $results $result (== (car-atom $result) inop)) $result (index-atom $result 1))
-          (- (size-atom $paths) $max_tools)
-          (join-text "\n" (map-atom (filter-atom $results $result (== (car-atom $result) failed)) $result (index-atom $result 1))))))
+     ((map-atom (filter-atom $results $result (== (car-atom $result) inop)) $result (index-atom $result 1))
+      (- (size-atom $paths) $max_tools)
+      (str:join "\n" (map-atom (filter-atom $results $result (== (car-atom $result) failed)) $result (index-atom $result 1))))))
 
 (= (native_tool ($name $path $description $parameters))
-   (json-object ((json-pair type "function")
-                 (json-pair function (json-object ((json-pair name (text_to_string $name))
-                                                   (json-pair description $description)
-                                                   (json-pair parameters (json-object ((json-pair type "object")
-                                                                                       (json-pair properties (json-object (map-atom $parameters $parameter (json-pair (string-to-atom $parameter) (json-object ((json-pair type "string")))))))
-                                                                                       (json-pair required $parameters)
-                                                                                       (json-pair additionalProperties false))))))))))
+   (JsonObject ((JsonPair "type" "function")
+                (JsonPair "function" (JsonObject ((JsonPair "name" $name)
+                                                  (JsonPair "description" $description)
+                                                  (JsonPair "parameters" (JsonObject ((JsonPair "type" "object")
+                                                                                      (JsonPair "properties" (JsonObject (map-atom $parameters $parameter (JsonPair $parameter (JsonObject ((JsonPair "type" "string")))))))
+                                                                                      (JsonPair "required" (JsonArray $parameters))
+                                                                                      (JsonPair "additionalProperties" false))))))))))
 
-;; returns the OpenAI tool schemas as JSON text
-(= (native_tools $inops) (json-text (map-atom $inops $inop (native_tool $inop))))
+;; returns the OpenAI tool schemas as a JSON array
+(= (native_tools $inops) (JsonArray (map-atom $inops $inop (native_tool $inop))))
 
 (= (load_transformation_descriptions $timeout)
-   (join-text "\n" (map-atom (module-files "transformations") $path
-                             (case (invoke_dynamic $path "__description__" () (no-kwargs) $timeout)
-                                   (((ok $description) (atomics_to_string ((file-stem $path) ": " $description)))
-                                    ($error (atomics_to_string ((file-stem $path) ": [DESCRIPTION MISSING]"))))))))
+   (str:join "\n" (map-atom (module-files "transformations") $path
+                            (case (invoke_dynamic $path "__description__" () (no-kwargs) $timeout)
+                              (((ok $description) (str-cat ((module-name $path) ": " $description)))
+                               ($error (str-cat ((module-name $path) ": [DESCRIPTION MISSING]"))))))))
 
 (= (transformation_step ($messages $tools $errors) $path $timeout)
    (case (invoke_dynamic $path "transform" (cons-atom $messages (cons-atom $tools ())) (no-kwargs) $timeout)
-         (((ok ($new_messages $new_tools)) (cons-atom $new_messages (cons-atom $new_tools (cons-atom $errors ()))))
-          ((ok $other) (cons-atom $messages (cons-atom $tools (cons-atom (append $errors (cons-atom (atomics_to_string ("[RUNTIME ERROR in " $path ": ValueError: transform must return (messages, tools). Repair " $path " if needed.]")) ())) ()))))
-          ((error $error) (cons-atom $messages (cons-atom $tools (cons-atom (append $errors (cons-atom (atomics_to_string ("[RUNTIME ERROR in " $path ": RuntimeError: " $error ". Repair " $path " if needed.]")) ())) ())))))))
+     (((ok (JsonArray ($new_messages $new_tools))) (cons-atom $new_messages (cons-atom $new_tools (cons-atom $errors ()))))
+      ((ok $other) (cons-atom $messages (cons-atom $tools (cons-atom (append $errors (cons-atom (str-cat ("[RUNTIME ERROR in " $path ": ValueError: transform must return (messages tools). Repair " $path " if needed.]")) ())) ()))))
+      ((error $error) (cons-atom $messages (cons-atom $tools (cons-atom (append $errors (cons-atom (str-cat ("[RUNTIME ERROR in " $path ": RuntimeError: " $error ". Repair " $path " if needed.]")) ())) ())))))))
 
-;; messages as atoms, tools as JSON text
+;; messages as atoms, tools as a JSON array
 (= (apply_transformation $messages $tools $timeout)
    (let ($new_messages $new_tools $errors) (foldl-atom (module-files "transformations")
-                                                       ((map-atom $messages $atom (to_message $atom)) (json-parse $tools) ())
+                                                       ((JsonArray (map-atom $messages $atom (to_message $atom))) $tools ())
                                                        $state $path (transformation_step $state $path $timeout))
-        ((map-atom $new_messages $message (from_message $message)) (json-text $new_tools) (join-text "\n" $errors))))
+        (cons-atom (map-atom (json:array-items $new_messages) $message (from_message $message))
+                   (cons-atom $new_tools (cons-atom (str:join "\n" $errors) ())))))
 
-;; returns message_json finish_reason response usage
-(= (llm $messages $tools $model $max_tokens) (chat_completion (json-text (map-atom $messages $atom (to_message $atom))) $tools $model $max_tokens))
+;; returns message finish_reason response usage, or the (Error what why) of a failed call
+(= (llm $messages $tools $model $max_tokens) (chat_completion (JsonArray (map-atom $messages $atom (to_message $atom))) $tools $model $max_tokens))
 
 (= (message_content $message)
-   (let $content (json-get (json-parse $message) content null)
+   (let $content (json:get $message "content")
         (if (and (is-string $content) (not (== $content ""))) $content "")))
 
 (= (message_content_repr $message)
-   (let $content (json-get (json-parse $message) content null)
-        (if (== $content null) "None" (repr $content))))
+   (let $content (json:get $message "content")
+        (if (== $content JsonNull) "None" (repr $content))))
 
-(= (set_message_content $message $content) (json-text (json-put (json-parse $message) content (text_to_string $content))))
+(= (set_message_content $message $content) (object-put $message "content" $content))
 
-(= (message_calls $message) (let $calls (json-get (json-parse $message) tool_calls null) (if (== $calls null) () $calls)))
+(= (message_calls $message) (let $calls (json:get $message "tool_calls") (if (== $calls JsonNull) () (json:array-items $calls))))
 
 ;; returns ((id name arguments) ...)
 (= (message_tool_calls $message)
    (map-atom (message_calls $message) $call
-             (let $function (json-get $call function null)
-                  (cons-atom (json-get $call id "") (cons-atom (string-to-atom (json-get $function name "")) (cons-atom (json-get $function arguments "") ()))))))
+             (let $function (json:get $call "function")
+                  (cons-atom (json:get $call "id") (cons-atom (json:get $function "name") (cons-atom (json:get $function "arguments") ()))))))
 
 (= (limit_tool_calls $message $limit)
    (if (== (message_calls $message) ())
        $message
-       (json-text (json-put (json-parse $message) tool_calls (first-n $limit (message_calls $message))))))
+       (object-put $message "tool_calls" (JsonArray (first-n $limit (message_calls $message))))))
 
-(= (strip_reasoning $message) (json-text (json-delete (json-delete (json-delete (json-parse $message) reasoning) reasoning_details) reasoning_content)))
+(= (strip_reasoning $message) (object-without $message ("reasoning" "reasoning_details" "reasoning_content")))
 
-;; returns status(ok/notdict/invalid) printable_arguments error
+;; json.loads of the arguments, as Python reads them; returns status(ok/notdict/invalid) printable_arguments error
 (= (parse_tool_arguments $arguments)
-   (case (collapse (catch (once (json-parse $arguments))))
-         ((((Error $type $context)) (invalid $arguments (atomics_to_string ("Invalid tool arguments from model: " (repr $type)))))
-          (((Error $exception)) (invalid $arguments (atomics_to_string ("Invalid tool arguments from model: " (repr $exception)))))
-          (($parsed) (if (json-is-object $parsed) (ok $arguments "") (notdict $arguments "")))
-          ($none (invalid $arguments "Invalid tool arguments from model")))))
+   (case (json:parse-python $arguments)
+     (((JsonObject $pairs) (ok $arguments ""))
+      ($parsed (if (python-json-error $parsed)
+                   (invalid $arguments (str-cat ("Invalid tool arguments from model: " (index-atom $parsed 2))))
+                   (notdict $arguments ""))))))
+(= (python-json-error $value) (if (== (get-metatype $value) Expression) (== (car-atom $value) JsonPythonErrorV1) false))
 
 (= (invoke_tool $path $arguments $timeout)
-   (case (collapse (catch (once (invoke_dynamic $path "run" () (json-parse $arguments) $timeout))))
-         ((((ok $result)) (if (== $result null) "None" $result))
-          (((error $error)) (atomics_to_string ("Tool execution failed: " $error)))
-          ($exception (atomics_to_string ("Tool execution failed: " (repr $exception)))))))
+   (case (invoke_dynamic $path "run" () (json:parse-python $arguments) $timeout)
+     (((ok JsonNull) "None")
+      ((ok $result) (text $result))
+      ((error $error) (str-cat ("Tool execution failed: " $error))))))

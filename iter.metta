@@ -2,12 +2,10 @@
 ;; utils.metta provides the helpers (dynamic execution, JSON, file listing), iter_llm.metta the model call.
 ;; All configuration is here and passed onward to the utils functions as arguments.
 ;; Python variables of the loop are MeTTa states with the same names (&experience, &post_task_mode, ...).
-;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant "<json>") (raw "<json>")
+;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant <json>) (raw <json>)
+;; Errors are values: a failed model call answers (Error what why), which ends the step as an exception did.
 
 !(import! &self utils)
-!(import_prolog_function atomics_to_string)
-!(import_prolog_function string_length)
-!(import_prolog_function sub_string)
 
 ;; --------------------------------------------------------------------
 ;; 0. Configuration:
@@ -17,9 +15,9 @@
 (= (MAX_TOOLS) 30)
 (= (MAX_TOOL_DESCRIPTION_CHARS) 500)
 (= (DYNAMIC_TIMEOUT) 5)
-(= (MODEL) (getenv-default "LLM_MODEL" "mlx-community/gemma-4-26b-a4b-it-4bit"))
-(= (BASE_URL) (getenv-default "BASE_URL" "http://192.168.64.1:2277/v1"))
-(= (API_KEY) (getenv-default "AI_API_KEY" "dummy"))
+(= (MODEL) (system:getenv-or-default "LLM_MODEL" "mlx-community/gemma-4-26b-a4b-it-4bit"))
+(= (BASE_URL) (system:getenv-or-default "BASE_URL" "http://192.168.64.1:2277/v1"))
+(= (API_KEY) (system:getenv-or-default "AI_API_KEY" "dummy"))
 (= (MAX_MEMORY_CHARS) 3000) ;When memory turns into an index
 (= (KEEP_REASONING_IN_EPISODE) true)
 (= (MAX_TOOL_CALLS) 10)
@@ -37,34 +35,23 @@
 ;; --------------------------------------------------------------------
 ;; Small helpers
 ;; --------------------------------------------------------------------
-(= (str-cat $parts) (atomics_to_string $parts))
-(= (empty-string $s) (== (string_length $s) 0))
-(= (join $sep $list) (if (== $list ()) "" (foldl-atom (cdr-atom $list) (car-atom $list) $acc $x (str-cat ($acc $sep $x)))))
+(= (empty-string $s) (== $s ""))
 (= (snoc $list $x) (append $list ($x)))
 (= (push! $state $x) (change-state! $state (snoc (get-state $state) $x)))
-(= (sleep $t) (progn (translatePredicate (sleep $t)) true))
-(= (gc) (progn (translatePredicate (garbage_collect)) true))
-(= (get_current_time) (format-time "%Y-%m-%d %H:%M:%S"))
+(= (get_current_time) (system:format-time "%Y-%m-%d %H:%M:%S" (system:wall-time) "local"))
 (= (step $text) (str-cat ("Step " (get_current_time) ": " $text)))
 (= (save_experience) (save_experience (get-state &experience)))
-(= (truncate $s $n) (str-cat ((sub_string $s 0 $n $_) " [TRUNCATED]")))
+(= (truncate $s $n) (str:concat (str:char-slice $s 0 $n) " [TRUNCATED]"))
 (= (take $n $list) (if (or (<= $n 0) (== $list ())) () (cons-atom (car-atom $list) (take (- $n 1) (cdr-atom $list)))))
 (= (drop $n $list) (if (or (<= $n 0) (== $list ())) $list (drop (- $n 1) (cdr-atom $list))))
-(= (error_text $error)
-   (case $error
-         (((Error $type $ctx)
-           (let $r (collapse (progn (translatePredicate (= $type (Predicate (python_error $T $V))))
-                                    (exception_text $V)))
-                (if (== $r ()) (repr $type) (car-atom $r))))
-          ($other (repr $other)))))
 
 ;; --------------------------------------------------------------------
 ;; 2. Runtime helpers (receive, slow_wait_for_input)
 ;; --------------------------------------------------------------------
 (= (receive)
-   (join "\n" (filter-atom (map-atom (channel_paths) $path
-                                     (receive_channel $path (DYNAMIC_TIMEOUT)))
-                           $event (not (empty-string $event)))))
+   (str:join "\n" (filter-atom (map-atom (channel_paths) $path
+                                         (receive_channel $path (DYNAMIC_TIMEOUT)))
+                               $event (not (empty-string $event)))))
 
 (= (slow_wait_for_input) (slow_wait_for_input 0))
 (= (slow_wait_for_input $second)
@@ -82,7 +69,7 @@
        ()
        (cons-atom (if (< $i (- $n (RETURN_VALUE_PRESERVE_MESSAGES)))
                       (case (car-atom $experience)
-                            (((tool $id $content) (if (> (string_length $content) (RETURN_VALUE_PRESERVE))
+                            (((tool $id $content) (if (> (str:char-length $content) (RETURN_VALUE_PRESERVE))
                                                       (tool $id (truncate $content (RETURN_VALUE_PRESERVE)))
                                                       (tool $id $content)))
                              ((assistant $m) (assistant (strip_reasoning $m)))
@@ -104,18 +91,22 @@
 ;; --------------------------------------------------------------------
 (= (cleanup_interval) (- (MAX_EXPERIENCE_SIZE) (RETAIN_EXPERIENCE_SIZE)))
 
+;; An experience.json that cannot be read stops the loop before it starts.
 (= (main)
-   (progn (change-state! &experience (load_experience))
-          (init_client (BASE_URL) (API_KEY) (LLM_TIMEOUT))
-          (sleep (INIT_WAIT))
-          (translatePredicate (make_directory_path "memory"))
-          (translatePredicate (make_directory_path "transformations"))
-          (change-state! &post_task_mode false)
-          (change-state! &autonomous_steps 0)
-          (change-state! &new_burst true)
-          (change-state! &pending_event_append "")
-          (change-state! &cleanup_bucket (floor-math (/ (size-atom (get-state &experience)) (cleanup_interval))))
-          (Loop)))
+   (case (load_experience)
+     (((Error $what $why) (Error $what $why))
+      ($experience
+       (progn (change-state! &experience $experience)
+              (init_client (BASE_URL) (API_KEY) (LLM_TIMEOUT))
+              (sleep (INIT_WAIT))
+              (fs:make-directories "memory" 511)
+              (fs:make-directories "transformations" 511)
+              (change-state! &post_task_mode false)
+              (change-state! &autonomous_steps 0)
+              (change-state! &new_burst true)
+              (change-state! &pending_event_append "")
+              (change-state! &cleanup_bucket (floor-math (/ (size-atom (get-state &experience)) (cleanup_interval))))
+              (Loop))))))
 
 ;; while True:
 (= (Loop)
@@ -130,61 +121,68 @@
      (change-state! &experience (drop_leading_tool_messages (get-state &experience)))
      (change-state! &history_checkpoint (size-atom (get-state &experience))) ;before user input
      ;; try:
-     (case (collapse (catch (once
-       (progn
-         (sleep (DEFAULT_DELAY))
-         (println! "BEFORE RECEIVE")
-         (change-state! &event_append (if (empty-string (get-state &pending_event_append))
-                                          (receive)
-                                          (get-state &pending_event_append)))
-         (println! "AFTER RECEIVE")
-         (if (not (empty-string (get-state &event_append)))
-             (progn (change-state! &autonomous_steps 0)
-                    (change-state! &new_burst false)
-                    (change-state! &post_task_mode false)
-                    (println! (str-cat ("IN FROM CHANNEL " (get-state &event_append))))
-                    (push! &experience (user (step (get-state &event_append))))
-                    (save_experience)
-                    (change-state! &pending_event_append "")
-                    (change-state! &base_temporary_message ()))
-             (if (get-state &new_burst)
-                 (progn (change-state! &post_task_mode true)
-                        (change-state! &new_burst false)
-                        (change-state! &base_temporary_message ((user (step "[TASK COMPLETED. DO NOT RE-SEND THE COMPLETED RESPONSE BUT SEND IN CASE YOU FORGOT. NOW QUERY FOR AND PICK A TASK BASED ON YOUR GOALS, PREFERABLY MEMORY CONSOLIDATION: FINDING EPISODES WHICH SUPPORT / CONTRADICT LTM ITEMS, LINKING EPISODES, PROMOTING USEFUL MEMORIES]")))))
-                 (if (get-state &post_task_mode)
-                     (change-state! &base_temporary_message ((user (step "[NO NEW USER INPUT. CONTINUE AUTONOMOUS WORK. DO NOT REPEAT THE PREVIOUS RESPONSE. ONLY USE send FOR GENUINELY NEW INFORMATION OR WHEN USER INPUT IS NEEDED.]"))))
-                     (change-state! &base_temporary_message ((user (step "[NO ADDITIONAL USER INPUT. CONTINUE THE CURRENT USER TASK.]")))))))
-         (change-state! &history_checkpoint (size-atom (get-state &experience))) ;as we want not to loose user input even when exception
-         (LLMLoop ()) ;the inner while True, sets &INOPS &response &message &tool_calls
-         (println! (str-cat ("RESPONSE " (get-state &response) "\nFINISH_REASON " (get-state &finish_reason) "\nUSAGE " (get-state &usage))))
-         (push! &experience (assistant (if (KEEP_REASONING_IN_EPISODE)
-                                           (get-state &message)
-                                           (strip_reasoning (get-state &message)))))
-         (change-state! &tool_outputs ())
-         (map-atom (get-state &tool_calls) $tool_call (ToolCall $tool_call))
-         (change-state! &history_checkpoint (size-atom (get-state &experience))) ;tool calls succeeded, even on later exception we won't unroll them
-         (save_experience)
-         (println! (str-cat ("Output> " (join "\n" (get-state &tool_outputs)))))
-         (change-state! &autonomous_steps (if (empty-string (get-state &event_append)) (+ (get-state &autonomous_steps) 1) 0))
-         (let $called_nop (is-member nop (map-atom (get-state &tool_calls) $call (index-atom $call 1)))
-              (if $called_nop
-                  (progn (change-state! &new_burst true)
-                         (change-state! &autonomous_steps 0)
-                         (change-state! &pending_event_append (slow_wait_for_input)))
-                  (if (>= (get-state &autonomous_steps) (MAX_FAST_STEPS))
-                      (progn (change-state! &autonomous_steps 0)
-                             (change-state! &pending_event_append (slow_wait_for_input))) _)))
-         ok))))
-       ;; except Exception as error:
+     (case (collapse (once (Step)))
        (((ok) _)
+        ;; except Exception as error:
         ($error (progn (println! (str-cat ("Output> " (if (== $error ()) "no result" (error_text (car-atom $error))))))
                        (change-state! &experience (take (get-state &history_checkpoint) (get-state &experience)))
                        (sleep (ERROR_RECOVERY_TIME))))))
      (cut)
-     (gc)
      (Loop)))
 
-;; The inner "while True:" which calls the LLM until the response contains a tool call
+;; The body of "try:". It answers ok, or the (Error what why) of a failed model
+;; call; a step with no result failed too.
+(= (Step)
+   (progn
+     (sleep (DEFAULT_DELAY))
+     (println! "BEFORE RECEIVE")
+     (change-state! &event_append (if (empty-string (get-state &pending_event_append))
+                                      (receive)
+                                      (get-state &pending_event_append)))
+     (println! "AFTER RECEIVE")
+     (if (not (empty-string (get-state &event_append)))
+         (progn (change-state! &autonomous_steps 0)
+                (change-state! &new_burst false)
+                (change-state! &post_task_mode false)
+                (println! (str-cat ("IN FROM CHANNEL " (get-state &event_append))))
+                (push! &experience (user (step (get-state &event_append))))
+                (save_experience)
+                (change-state! &pending_event_append "")
+                (change-state! &base_temporary_message ()))
+         (if (get-state &new_burst)
+             (progn (change-state! &post_task_mode true)
+                    (change-state! &new_burst false)
+                    (change-state! &base_temporary_message ((user (step "[TASK COMPLETED. DO NOT RE-SEND THE COMPLETED RESPONSE BUT SEND IN CASE YOU FORGOT. NOW QUERY FOR AND PICK A TASK BASED ON YOUR GOALS, PREFERABLY MEMORY CONSOLIDATION: FINDING EPISODES WHICH SUPPORT / CONTRADICT LTM ITEMS, LINKING EPISODES, PROMOTING USEFUL MEMORIES]")))))
+             (if (get-state &post_task_mode)
+                 (change-state! &base_temporary_message ((user (step "[NO NEW USER INPUT. CONTINUE AUTONOMOUS WORK. DO NOT REPEAT THE PREVIOUS RESPONSE. ONLY USE send FOR GENUINELY NEW INFORMATION OR WHEN USER INPUT IS NEEDED.]"))))
+                 (change-state! &base_temporary_message ((user (step "[NO ADDITIONAL USER INPUT. CONTINUE THE CURRENT USER TASK.]")))))))
+     (change-state! &history_checkpoint (size-atom (get-state &experience))) ;as we want not to loose user input even when exception
+     (case (LLMLoop ()) ;the inner while True, sets &INOPS &response &message &tool_calls
+       (((Error $what $why) (Error $what $why))
+        ($answered
+         (progn
+           (println! (str-cat ("RESPONSE " (get-state &response) "\nFINISH_REASON " (get-state &finish_reason) "\nUSAGE " (get-state &usage))))
+           (push! &experience (assistant (if (KEEP_REASONING_IN_EPISODE)
+                                             (get-state &message)
+                                             (strip_reasoning (get-state &message)))))
+           (change-state! &tool_outputs ())
+           (map-atom (get-state &tool_calls) $tool_call (ToolCall $tool_call))
+           (change-state! &history_checkpoint (size-atom (get-state &experience))) ;tool calls succeeded, even on later exception we won't unroll them
+           (save_experience)
+           (println! (str-cat ("Output> " (str:join "\n" (get-state &tool_outputs)))))
+           (change-state! &autonomous_steps (if (empty-string (get-state &event_append)) (+ (get-state &autonomous_steps) 1) 0))
+           (let $called_nop (is-member "nop" (map-atom (get-state &tool_calls) $call (index-atom $call 1)))
+                (if $called_nop
+                    (progn (change-state! &new_burst true)
+                           (change-state! &autonomous_steps 0)
+                           (change-state! &pending_event_append (slow_wait_for_input)))
+                    (if (>= (get-state &autonomous_steps) (MAX_FAST_STEPS))
+                        (progn (change-state! &autonomous_steps 0)
+                               (change-state! &pending_event_append (slow_wait_for_input))) _)))
+           ok))))))
+
+;; The inner "while True:" which calls the LLM until the response contains a tool call,
+;; or answers the (Error what why) of a failed call
 (= (LLMLoop $retry_message)
    (progn
      (change-state! &temporary_message (append (get-state &base_temporary_message) $retry_message))
@@ -196,11 +194,11 @@
      (change-state! &TOOLS (native_tools (get-state &INOPS)))
      (change-state! &TRANSFORMATIONS (load_transformation_descriptions (DYNAMIC_TIMEOUT)))
      (let* (($memory_contents (memory_files))
-            ($memory_len (foldl-atom $memory_contents 0 $acc $mc (+ $acc (string_length (index-atom $mc 1))))))
+            ($memory_len (foldl-atom $memory_contents 0 $acc $mc (+ $acc (str:char-length (index-atom $mc 1))))))
            (if (<= $memory_len (MAX_MEMORY_CHARS))
                (change-state! &MEMORY (str-cat ("[" (- (MAX_MEMORY_CHARS) $memory_len) " CHARACTERS BELOW MAXIMUM]\n./memory/:\n"
-                                                (join "\n\n" (map-atom $memory_contents $mc (let ($path $content) $mc (str-cat ($path ":\n" $content))))))))
-               (progn (change-state! &MEMORY (str-cat ("./memory/:\n" (join "\n" (map-atom $memory_contents $mc (index-atom $mc 0))))))
+                                                (str:join "\n\n" (map-atom $memory_contents $mc (let ($path $content) $mc (str-cat ($path ":\n" $content))))))))
+               (progn (change-state! &MEMORY (str-cat ("./memory/:\n" (str:join "\n" (map-atom $memory_contents $mc (index-atom $mc 0))))))
                       (push! &temporary_message (user (str-cat ("[MEMORY FOLDER TOTAL CHARACTER CAPACITY BY FILES NOT BEGINNING WITH _ EXCEEDED BY " (- $memory_len (MAX_MEMORY_CHARS)) " CHARS. FIX THIS FIRST.]")))))))
      (change-state! &request_messages (cons-atom (system (str-cat ("prompt.txt:\n" (read_prompt)
                                                                    "\n\n./transformations/:\n" (get-state &TRANSFORMATIONS)
@@ -211,23 +209,25 @@
                  (change-state! &request_tools $request_tools)
                  (if (not (empty-string $transformation_error)) (push! &request_messages (user $transformation_error)) _)))
      (println! "BEFORE LLM")
-     (let ($message $finish_reason $response $usage) (llm (get-state &request_messages) (get-state &request_tools) (MODEL) (MAX_TOKENS))
-          (progn (change-state! &message $message)
-                 (change-state! &finish_reason $finish_reason)
-                 (change-state! &response $response)
-                 (change-state! &usage $usage)))
-     (println! (str-cat ("AFTER LLM " (get-state &response))))
-     (let $content (message_content (get-state &message))
-          (if (not (empty-string $content))
-              (change-state! &message (set_message_content (get-state &message) (str-cat ($content "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]")))) _))
-     (change-state! &tool_calls (message_tool_calls (get-state &message)))
-     (if (not (== (get-state &tool_calls) ()))
-         (progn (change-state! &message (limit_tool_calls (get-state &message) (MAX_TOOL_CALLS)))
-                (change-state! &tool_calls (take (MAX_TOOL_CALLS) (get-state &tool_calls)))) ;break
-         (LLMLoop (if (== (get-state &finish_reason) length)
-                      ((user "[OUTPUT TOKEN LIMIT REACHED. CALL THE REQUIRED TOOL CONCISELY.]"))
-                      ((user (str-cat ("[YOUR PREVIOUS RESPONSE CONTAINED NO TOOL CALL AND WAS NOT DELIVERED. CALL AT LEAST ONE TOOL NOW. IF YOU INTENDED THIS CONTENT AS COMMUNICATION, USE send: "
-                                       (message_content_repr (get-state &message)) "]")))))))))
+     (case (llm (get-state &request_messages) (get-state &request_tools) (MODEL) (MAX_TOKENS))
+       (((Error $what $why) (Error $what $why))
+        (($message $finish_reason $response $usage)
+         (progn (change-state! &message $message)
+                (change-state! &finish_reason $finish_reason)
+                (change-state! &response $response)
+                (change-state! &usage $usage)
+                (println! (str-cat ("AFTER LLM " (get-state &response))))
+                (let $content (message_content (get-state &message))
+                     (if (not (empty-string $content))
+                         (change-state! &message (set_message_content (get-state &message) (str-cat ($content "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]")))) _))
+                (change-state! &tool_calls (message_tool_calls (get-state &message)))
+                (if (not (== (get-state &tool_calls) ()))
+                    (progn (change-state! &message (limit_tool_calls (get-state &message) (MAX_TOOL_CALLS)))
+                           (change-state! &tool_calls (take (MAX_TOOL_CALLS) (get-state &tool_calls)))) ;break
+                    (LLMLoop (if (== (get-state &finish_reason) "length")
+                                 ((user "[OUTPUT TOKEN LIMIT REACHED. CALL THE REQUIRED TOOL CONCISELY.]"))
+                                 ((user (str-cat ("[YOUR PREVIOUS RESPONSE CONTAINED NO TOOL CALL AND WAS NOT DELIVERED. CALL AT LEAST ONE TOOL NOW. IF YOU INTENDED THIS CONTENT AS COMMUNICATION, USE send: "
+                                                  (message_content_repr (get-state &message)) "]")))))))))))))
 
 ;; Body of "for tool_call in message.tool_calls:"
 (= (ToolCall ($id $tool_name $arguments))
@@ -240,7 +240,7 @@
                          (if (== $status notdict)
                              "Tool arguments must be a JSON object"
                              (invoke_tool (index-atom (car-atom $tool) 1) $arguments (DYNAMIC_TIMEOUT))))))
-          ($ret (if (> (string_length $ret0) (MAX_TOOL_OUTPUT_CHARS)) (truncate $ret0 (MAX_TOOL_OUTPUT_CHARS)) $ret0)))
+          ($ret (if (> (str:char-length $ret0) (MAX_TOOL_OUTPUT_CHARS)) (truncate $ret0 (MAX_TOOL_OUTPUT_CHARS)) $ret0)))
          (progn (push! &experience (tool $id (step $ret)))
                 (push! &tool_outputs (str-cat ("tool call: " $tool_name " " $tool_arguments "\ntool return: " $ret))))))
 

@@ -1,61 +1,73 @@
 ;; Iter's OpenAI-compatible model call in MeTTa, over CeTTa's native HTTP.
-;; Replaces utils.py's init_client, chat_completion and exception_text; the
-;; JSON helpers are utils.metta's. The request is the one utils.py sends.
+;; Replaces utils.py's init_client and chat_completion; str-cat and text are
+;; utils.metta's. The request is the one utils.py sends, and a failed call
+;; answers (Error what why) instead of raising.
 !(import! &self (library io))
+!(import! &self (library json))
 !(import! &self (library str))
-!(use-module! uuid)
+!(import! &self (library system))
+
+;; str(uuid.uuid4()): the 32 hex digits grouped 8-4-4-4-12
+(= (iter-llm:uuid4)
+   (let $hex (system:uuid4-hex)
+        (str:join "-" ((str:char-slice $hex 0 8) (str:char-slice $hex 8 12) (str:char-slice $hex 12 16)
+                       (str:char-slice $hex 16 20) (str:char-slice $hex 20 32)))))
 
 ;; One session id per client, sent with the tenant on every request as
 ;; utils.py's default_headers did.
 (= (init_client $base_url $api_key $timeout)
-   (let $session (progn (translatePredicate (uuid $id ((Predicate (version 4))))) (repr $id))
-        (progn (change-state! &iter_llm_client (client $base_url $api_key $timeout $session)) true)))
-
-(= (exception_text $error) (repr $error))
+   (change-state! &iter_llm_client (client $base_url $api_key $timeout (iter-llm:uuid4))))
 
 ;; Like model_dump(exclude_none=True): absent and null fields are the same.
-(= (iter-llm:without-nulls $object)
-   (json-object (filter-atom (json-pairs $object) $pair (not (== (json-pair-value $pair) null)))))
+(= (iter-llm:without-nulls (JsonObject $pairs))
+   (JsonObject (filter-atom $pairs $pair (let (JsonPair $key $value) $pair (not (== $value JsonNull))))))
 
 (= (iter-llm:request $messages $tools $model $max_tokens)
-   (json-text (json-object ((json-pair model $model)
-                            (json-pair messages (json-parse $messages))
-                            (json-pair tools (json-parse $tools))
-                            (json-pair tool_choice "required")
-                            (json-pair max_tokens $max_tokens)
-                            (json-pair enable_thinking true)))))
+   (json:stringify (JsonObject ((JsonPair "model" $model)
+                                (JsonPair "messages" $messages)
+                                (JsonPair "tools" $tools)
+                                (JsonPair "tool_choice" "required")
+                                (JsonPair "max_tokens" $max_tokens)
+                                (JsonPair "enable_thinking" true)))))
 
-;; returns message_json finish_reason response usage, as utils.py did
+;; returns message finish_reason response usage, as utils.py did
 (= (iter-llm:answer $text)
-   (let* (($response (json-parse $text))
-          ($choice (car-atom (json-get $response choices ())))
-          ($message (iter-llm:without-nulls (json-get $choice message (json-object ()))))
-          ($finish (string-to-atom (json-get $choice finish_reason "stop")))
-          ($usage (json-get $response usage null)))
-     ((json-text $message) $finish $text (if (== $usage null) "None" (json-text $usage)))))
+   (let $response (json:parse $text)
+        (case (json:get $response "choices")
+          (((JsonArray $choices)
+            (if (== $choices ())
+                (Error "Response" "no choices")
+                (let* (($choice (car-atom $choices))
+                       ($finish (json:get $choice "finish_reason"))
+                       ($usage (json:get $response "usage")))
+                  ((iter-llm:without-nulls (json:get $choice "message"))
+                   (if (is-string $finish) $finish "None")
+                   $text
+                   (if (== $usage JsonNull) "None" (json:stringify $usage))))))
+           ($other (Error "Response" "not a chat completion"))))))
+
+;; The answer to a submitted request, waited for as long as the client's
+;; timeout; a request that times out is cancelled.
+(= (iter-llm:outcome $id $timeout)
+   (case (io:wait $id (* $timeout 1000))
+     (((io:event $received (http:response 200 $text)) (iter-llm:answer $text))
+      ((io:event $received (http:response $status $text)) (Error (str-cat ("HTTP " $status)) $text))
+      ((io:event $received (Error $request (http:error $kind $code $message))) (Error "Transport" $message))
+      ((io:idle) (progn (io:cancel $id) (Error "Timeout" (str-cat ("no answer within " $timeout " s")))))
+      ($other (Error "Transport" (text $other))))))
 
 (= (chat_completion $messages $tools $model $max_tokens)
-   (let* (($client (get-state &iter_llm_client))
-          ((client $base $key $timeout $session) $client)
+   (let* (((client $base $key $timeout $session) (get-state &iter_llm_client))
           ($url (str:concat $base "/chat/completions"))
           ($authorization (str:concat "Bearer " $key))
           ($milliseconds (* $timeout 1000))
           ($body (iter-llm:request $messages $tools $model $max_tokens))
           ;; http:request is data: bind the complete request before submitting it.
-          ;; Headers are built with cons-atom: an inline list headed by an
-          ;; expression would be read as an application in a compiled body.
-          ($headers (cons-atom (http:header "Content-Type" "application/json")
-                      (cons-atom (http:header "Authorization" $authorization)
-                        (cons-atom (http:header "X-APC-Tenant" "iter")
-                          (cons-atom (http:header "x-session-id" $session) ())))))
+          ($headers ((http:header "Content-Type" "application/json")
+                     (http:header "Authorization" $authorization)
+                     (http:header "X-APC-Tenant" "iter")
+                     (http:header "x-session-id" $session)))
           ($request (http:request "POST" $url $headers $body $milliseconds 67108864)))
-     ;; io:try-submit takes the request as data (Atom); io:submit would evaluate it.
-     (case (io:try-submit $request)
-       (((io:pending $id)
-         (case (io:try-wait $id $milliseconds)
-           (((io:event $id (http:response 200 $text)) (iter-llm:answer $text))
-            ((io:event $id (http:response $status $text))
-             (translatePredicate (throw (llm_http_error $status $text))))
-            ((io:idle) (progn (io:cancel $id) (translatePredicate (throw (llm_timeout $milliseconds)))))
-            ($other (translatePredicate (throw (llm_transport_error $other)))))))
-        ((io:failed) (translatePredicate (throw (llm_transport_error submit-refused))))))))
+     (case (io:submit $request)
+       (((io:pending $id) (iter-llm:outcome $id $timeout))
+        ((Error $what $why) (Error "Request" $why))))))

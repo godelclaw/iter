@@ -13,7 +13,7 @@ A tool fails by answering (Error what "why").
 You can create transformations as .metta files in ./transformations/ (executed in alphabetical order) to modify messages and tools before each model call. It must define:
 (= (description) "What the context transformation does")
 (= (transform $messages $tools) ($messages $tools))
-Messages and tools are JSON values: objects are json([key=value, ...]) terms, read and built with json-get, json-put, json-object and json-pair.
+Messages and tools are CeTTa JSON values: each is a (JsonArray (...)) of objects (JsonObject ((JsonPair "key" value) ...)), whose values are strings, numbers, true, false, JsonNull, objects and arrays. (json:get $object "key") reads a value.
 Example use cases:
 - inspect messages
 - write transcript/checkpoints
@@ -23,6 +23,7 @@ Example use cases:
 - inject additional context
 - alter which tools are exposed
 #MODULES:
-Each call runs in a fresh CeTTa process with utils.metta loaded, so its helpers (read-text, write-text, file-exists, json-parse, json-text, strip, ...) are available. CeTTa libraries are imported with !(import! &self (library NAME)), e.g. proc, str, fs.
+Each call runs in a fresh CeTTa process with utils.metta loaded, so its helpers (str-cat, text, ...) and CeTTa's json, str, fs, system, proc and io libraries are available: call json:parse, fs:read-text, fs:write, str:trim, ... directly. Other libraries are imported with !(import! &self (library NAME)).
+A process that a module starts with proc:run should have the option (lifetime owner), so that it ends with the call.
 #LESSONS:
 If name starts with underline, it is not considered. Can be used to de-activate items.
