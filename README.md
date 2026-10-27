@@ -23,8 +23,9 @@ The module formats, which the agent uses to extend itself, are in
 
 Use a Linux build of CeTTa with HTTP (`make ENABLE_HTTP=1`), which places
 `cetta.proc-scope` beside the binary. It needs `system:executable`,
-`system:read-line` with a timeout, and the process library's `inherit` and
-`null` standard streams. Configure the model as upstream does:
+`system:read-line` with a timeout, the process library's `inherit` and `null`
+standard streams and its `run` and `detached` lifetimes, and `fs:lock`'s
+`exclusive-nowait`. Configure the model as upstream does:
 
 ```sh
 export LLM_MODEL=... BASE_URL=... AI_API_KEY=...
