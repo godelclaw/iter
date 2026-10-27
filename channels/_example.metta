@@ -1,11 +1,14 @@
 ;; A channel whose connection or state must outlive a single call keeps a
 ;; daemon: receive and send only exchange files with it. The daemon is this
-;; module run after utils.metta with --daemon. A process job ends with its
-;; owner, so a shell starts the daemon in the background, with its output
-;; discarded, and the daemon outlives the worker that started it.
+;; module run after utils.metta with --daemon, started detached so that it
+;; outlives the worker that started it. It holds a lock while it runs, which
+;; is how a worker knows it is there, and a second daemon, started in a race,
+;; finds the lock held and leaves. Its process id is written for whoever
+;; stops it; nothing relies on it for liveness.
 
 (= (example:inbox) "channels/.runtime/example/inbox")
 (= (example:outbox) "channels/.runtime/example/outbox")
+(= (example:lock-file) "channels/.runtime/example/daemon.lock")
 (= (example:pid-file) "channels/.runtime/example/pid")
 
 (= (example:directories)
@@ -20,17 +23,25 @@
                 $path (fs:is-file $path)))
 (= (example:new-file $directory) (str-cat ($directory "/" (system:monotonic-ns))))
 
-(= (example:running)
-   (if (fs:is-file (example:pid-file))
-       (== (system:pid-alive? (str:string->number (str:trim (fs:read-text (example:pid-file))))) true)
-       false))
+(= (example:lock) (fs:open-write (example:lock-file) ("create") 384))
 
-;; the shell prints the daemon's process id
+(= (example:running)
+   (let* (($owner (example:lock))
+          ($state (fs:lock $owner exclusive-nowait))
+          ($closed (fs:close $owner)))
+     (== $state fs:held)))
+
+;; A start answers once the daemon holds its lock and has written its process
+;; id, or after two seconds.
+(= (example:started $tries)
+   (if (or (<= $tries 0) (and (example:running) (fs:is-file (example:pid-file))))
+       true
+       (progn (sleep 0.02) (example:started (- $tries 1)))))
 (= (example:start)
-   (case (proc:run ("sh" "-c" "\"$0\" \"$@\" >/dev/null 2>&1 & echo $!"
-                    (cetta) "--lang" "petta" "--no-results" "utils.metta" "channels/_example.metta" "--daemon")
-                   ((stderr null)))
-     (((proc:result (proc:exited 0) $cause $out $err $capture) (fs:write (example:pid-file) (str:trim $out))))))
+   (progn (fs:remove (example:pid-file))
+          (proc:spawn ((cetta) "--lang" "petta" "--no-results" "utils.metta" "channels/_example.metta" "--daemon")
+                      ((lifetime detached) (stdout null) (stderr null)))
+          (example:started 100)))
 
 (= (ensure_daemon)
    (progn (example:directories)
@@ -63,7 +74,10 @@
 
 (= (example:daemon)
    (progn (example:directories)
-          (fs:write (example:pid-file) (text (system:pid)))
-          (example:serve)))
+          (let $owner (example:lock)
+               (if (== (fs:lock $owner exclusive-nowait) fs:locked)
+                   (progn (fs:write (example:pid-file) (text (system:pid)))
+                          (example:serve))
+                   (system:exit 0)))))
 
 !(if (is-member --daemon (system:args)) (example:daemon) ())

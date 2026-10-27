@@ -20,7 +20,7 @@
    (let $source (str:trim $code)
         (if (== $source "")
             "No MeTTa code provided"
-            (case (proc:run ((cetta) "--lang" "petta" "-e" (str:concat (metta:imports) $source)) ((timeout-ms 30000) (lifetime owner)))
+            (case (proc:run ((cetta) "--lang" "petta" "-e" (str:concat (metta:imports) $source)) ((timeout-ms 30000) (lifetime run)))
               (((proc:result $termination proc:timed-out $out $err $capture) "Timeout: MeTTa evaluation took longer than 30 seconds")
                ((proc:result (proc:launch-failed $errno $stage) $cause $out $err $capture)
                 (str-cat ("Error: could not start CeTTa (" $stage ", errno " $errno ")")))
