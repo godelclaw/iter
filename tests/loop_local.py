@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--python-tools", action="store_true")
     parser.add_argument("--history-size", type=int, default=0)
+    parser.add_argument("--transcript", type=Path,
+                        help="valid UTF-8 fixture copied into the loop workspace")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
@@ -40,8 +42,17 @@ def main():
         (source / "experience.json").write_text(json.dumps([
             {"role": "user", "content": f"old fixture {number}"}
             for number in range(args.history_size)]))
+    transcript = None
+    transcript_identity = None
+    if args.transcript:
+        data = args.transcript.read_bytes()
+        (source / "transcript.txt").write_bytes(data)
+        transcript_identity = hashlib.sha256(data).hexdigest()
+        with args.transcript.open(encoding="utf-8") as handle:
+            transcript = "transcript:\n" + "".join(handle.readlines()[-6:]).rstrip()
     (evidence / "source-adaptations.json").write_text(json.dumps(
-        {"enable_python_tool": args.python_tools, "seed_history_size": args.history_size}, indent=2) + "\n")
+        {"enable_python_tool": args.python_tools, "seed_history_size": args.history_size,
+         "transcript_sha256": transcript_identity}, indent=2) + "\n")
     script = [("send", {"channel": "terminal", "content": "fixture delivered"}),
               ("shell", {"cmd": "printf shell-proof"}),
               ("metta", {"code": "!(+ 1 2)"}),
@@ -121,6 +132,12 @@ def main():
             assert len(requests) == len(script) + 1, requests
             assert len({r["session"] for r in requests}) == 1 and requests[0]["session"]
             assert all(r["tenant"] == "iter" and r["body"]["model"] == "fixture-model" for r in requests)
+            if transcript is not None:
+                for request in requests:
+                    first = request["body"]["messages"][0]
+                    assert first["role"] == "system" and first["content"].endswith(transcript), first
+                    assert first["content"].count("transcript:\n") == 1, first
+                assert hashlib.sha256((source / "transcript.txt").read_bytes()).hexdigest() == transcript_identity
             assert "OUTPUT TOKEN LIMIT REACHED" in requests[1]["body"]["messages"][-1]["content"]
             assert any("hello fixture" in str(m.get("content", "")) for m in experience if m["role"] == "user")
             receipts = [m for m in experience if m["role"] == "tool"]
