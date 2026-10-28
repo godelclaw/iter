@@ -17,6 +17,8 @@ Usage:
 import os
 import sys
 import importlib
+import inspect
+from pathlib import Path
 import traceback
 import io
 import contextlib
@@ -25,10 +27,17 @@ DESCRIPTION = "Execute arbitrary Python code with all other tools available as c
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 
+def _native_tool(path, signature):
+    def native(*args, **kwargs):
+        import iter_python
+        bound = signature.bind(*args, **kwargs)
+        return iter_python.native_call(path, "run", kwargs=bound.arguments)
+    return native
+
 def _load_tools():
     """Import all tool modules in the tools directory and expose their run() functions."""
     namespace = {}
-    for fname in os.listdir(TOOLS_DIR):
+    for fname in sorted(os.listdir(TOOLS_DIR)):
         if not fname.endswith('.py') or fname.startswith('_') or fname == 'python.py':
             continue
         mod_name = fname[:-3]
@@ -42,22 +51,36 @@ def _load_tools():
         except Exception as e:
             # Silently skip tools that fail to import
             pass
+    # The native versions of these tools are MeTTa modules. Use their declared
+    # parameter order; keyword validation belongs to the same worker as usual.
+    import iter_python
+    for path in sorted(Path(TOOLS_DIR).glob("*.metta")):
+        if path.name.startswith('_') or path.stem == 'python':
+            continue
+        try:
+            metadata = iter_python.native_call(path, "__tool_metadata__")
+            signature = inspect.Signature([inspect.Parameter(name,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                for name in metadata["parameters"]])
+            namespace[path.stem] = _native_tool(path, signature)
+        except Exception:
+            continue
     return namespace
 
 def run(code: str) -> str:
     """
     Execute arbitrary Python code with all tools available as callable functions.
-    
+
     Args:
         code: Python code string to execute. All tool run() functions are available
               as variables named after their module (e.g. shell, websearch, lean_check).
-    
+
     Returns:
         Captured stdout + any exception traceback if one occurs.
     """
     # Load all tool functions
     tools = _load_tools()
-    
+
     # Prepare execution namespace with tools + builtins
     exec_namespace = {}
     exec_namespace.update(tools)
@@ -70,10 +93,10 @@ def run(code: str) -> str:
         'subprocess': __import__('subprocess'),
         'print': print,
     })
-    
+
     # Capture stdout
     captured = io.StringIO()
-    
+
     try:
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
             exec(compile(code, '<python>', 'exec'), exec_namespace)

@@ -354,9 +354,15 @@ class Run:
             reserved.bind(("127.0.0.1", 0))
             out = self.child("worker-regression", ["tests/worker.metta"],
                 {"ITER_TEST_REFUSED_URL": f"http://127.0.0.1:{reserved.getsockname()[1]}/v1"}, timeout=40)
-        assert out.count("✅") == 53 and "❌" not in out, out
+        assert out.count("✅") == 64 and "❌" not in out, out
+        self.child("terminal-boundary", [], program=["python3", "tests/terminal_local.py",
+            "--binary", str(self.exe), "--evidence", str(self.e / "terminal-boundary")], timeout=30)
 
     def smoke(self):
+        disabled_runtime = self.e / "disabled-runtime"
+        assert self.worker("receive", extra={"ITER_IRC_HOST": "",
+            "ITER_IRC_RUNTIME": str(disabled_runtime)}) == {"ok": True, "result": ""}
+        assert not disabled_runtime.exists()
         out = self.child("units", ["tests/irc_units.metta"],
                          {"ITER_IRC_RUNTIME": str(self.e / "unit-runtime")})
         assert out.count("✅") == 26 and "❌" not in out, out

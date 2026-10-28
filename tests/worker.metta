@@ -76,8 +76,13 @@
 !(test (call "tests/fixtures/refuse.metta" "transform" ((one-message) (JsonArray ())) (no-kwargs)) (error "transform: refused"))
 
 ;; Python modules, in the format of Python Iter, run in the worker's Python
-!(test (json:get (metadata "tools/python.py") "parameters") (JsonArray ("code")))
-!(test (run-tool "tools/python.py" (kwargs1 "code" "print(6 * 7)")) (ok "42\n"))
+!(test (json:get (metadata "tools/_python.py") "parameters") (JsonArray ("code")))
+!(test (run-tool "tools/_python.py" (kwargs1 "code" "print(6 * 7)")) (ok "42\n"))
+!(test (run-tool "tools/_python.py" (kwargs1 "code" "print(shell('printf native-from-python'))"))
+       (ok "SUCCESS, RETURN: native-from-python\n"))
+!(test (run-tool "tools/_python.py" (kwargs1 "code" "print(nop())")) (ok "SUCCESS\n"))
+!(test (run-tool "tools/_python.py" (kwargs1 "code" "os.chdir('/'); print(shell('printf still-native'))"))
+       (ok "SUCCESS, RETURN: still-native\n"))
 !(test (run-tool "tests/fixtures/pyerror.py" (no-kwargs)) (error "ValueError: the widget is missing"))
 !(test (call "tests/fixtures/pychannel.py" "receive" () (no-kwargs)) (ok "from python"))
 !(test (case (call "tests/fixtures/pystamp.py" "transform" ((one-message) (JsonArray ())) (no-kwargs))
@@ -133,8 +138,10 @@
        (("tests/fixtures/texts/notes.txt" "goal: learn") ("tests/fixtures/texts/sub/deep.txt" "deep fact") ("tests/fixtures/texts/sub-b.txt" "a-b")))
 
 ;; modules
-!(test (module-files "tools") ("tools/metta.metta" "tools/nop.metta" "tools/python.py" "tools/send.metta" "tools/shell.metta"))
+!(test (module-files "tools") ("tools/metta.metta" "tools/nop.metta" "tools/send.metta" "tools/shell.metta"))
 !(test (module-name "channels/_example.metta") "_example")
+!(test (module-files "tests/fixtures/modules") ("tests/fixtures/modules/guest.py" "tests/fixtures/modules/native.metta"))
+!(test (run-tool (index-atom (module-files "tests/fixtures/modules") 1) (no-kwargs)) (ok "native twin"))
 
 ;; the model call: its request, its answer, and a failed call as a value
 !(test (iter-llm:answer "{\"choices\": [{\"finish_reason\": \"stop\", \"message\": {\"role\": \"assistant\", \"content\": \"x\", \"refusal\": null}}], \"usage\": {\"total_tokens\": 3}}")

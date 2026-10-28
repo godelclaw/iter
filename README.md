@@ -2,9 +2,10 @@
 
 This branch runs Patrick Hammer's MeTTa version of Iter (`iter.metta` and
 `utils.metta` from the `metta` branch) on
-[CeTTa](https://github.com/godelclaw/CeTTa) alone, with no Python and no
-SWI-Prolog: it uses CeTTa's native json, str, fs, system, proc and io
-libraries. The loop is Patrick's.
+[CeTTa](https://github.com/godelclaw/CeTTa) without SWI-Prolog. The loop,
+model client, worker protocol and native modules use CeTTa's json, str, fs,
+system, proc and io libraries. Python guest modules are optional. The loop
+is Patrick's, with its helpers ported to native MeTTa.
 
 - **The model call.** `iter_llm.metta` uses CeTTa's native HTTP client. It
   sends the request that `utils.py` sent through the OpenAI SDK. A failed call
@@ -12,9 +13,12 @@ libraries. The loop is Patrick's.
 - **Tools, channels and transformations** are `.metta` modules.
   `iter_worker.metta` runs each call in a CeTTa process of its own, which a
   timeout kills.
-- **Tools:** send, nop, shell, metta and python.
+- **Tools:** send, nop, shell and metta. The optional Python tool is disabled
+  as `tools/_python.py`; rename it to `tools/python.py` to enable it.
 - **Channels:** the terminal, IRC, and `_example.metta`, a channel that runs its own
   daemon.
+  One MeTTa reader owns terminal input for the loop's lifetime. Channel workers
+  receive complete lines from it, so a worker timeout cannot lose a partial line.
 - **Python modules.** A tool, channel or transformation may also be a `.py`
   file in Python Iter's format, so Python tools from the Python version work
   unchanged. The worker runs them in its own embedded Python through `py-call`
@@ -49,6 +53,16 @@ From the repository root:
 cetta --lang petta tests/worker.metta < /dev/null
 ```
 
+That full worker suite includes optional Python interoperability. The loop
+can also be checked with a core HTTP build, without Python or Prolog:
+
+```sh
+python3 tests/loop_local.py --binary /path/to/cetta --evidence /new/evidence/directory
+```
+
+The fixture is a local HTTP server; no model credentials or external service
+are needed. Add `--python-tools` to also test the optional Python tool.
+
 The worker regression accepts `ITER_TEST_REFUSED_URL` for a harness-owned HTTP
 refusal target. `tests/irc_local.py --help` describes the separate isolated IRC
 fixture harness; it uses only numeric loopback TCP/TLS, not a public server.
@@ -66,7 +80,7 @@ Settings are environment variables, inherited by the daemon:
 
 | Setting | Default |
 | --- | --- |
-| `ITER_IRC_HOST` | `irc.quakenet.org`; a `tcp://` or `tls://` prefix selects the scheme |
+| `ITER_IRC_HOST` | unset: the channel stays idle; set a host, optionally prefixed by `tcp://` or `tls://` |
 | `ITER_IRC_SCHEME` | `tcp`, when the host has no scheme prefix |
 | `ITER_IRC_PORT` | `6667`, or **6697 for TLS**, unless explicitly supplied |
 | `ITER_IRC_NICK` / `ITER_IRC_CHANNEL` | `Iter` / `##metta` |

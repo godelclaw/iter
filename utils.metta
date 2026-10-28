@@ -62,12 +62,15 @@
      (((fs:info directory $size $identity) true)
       ($other false))))
 
-;; sorted .metta and .py modules of a directory, without names beginning with _
+;; Sorted modules without underscore-prefixed names. A native module shadows
+;; its Python twin, so a port cannot execute the same transformation twice.
 (= (module-files $dir)
    (if (is-directory $dir)
        (map-atom (sort-atom (filter-atom (fs:entries $dir) $name
                                          (and (or (str:ends-with $name ".metta") (str:ends-with $name ".py"))
-                                              (not (str:starts-with $name "_")))))
+                                              (and (not (str:starts-with $name "_"))
+                                                (or (str:ends-with $name ".metta")
+                                                    (not (fs:is-file (str-cat ($dir "/" (str:char-slice $name 0 (- (str:char-length $name) 3)) ".metta")))))))))
                  $name (str-cat ($dir "/" $name)))
        ()))
 
@@ -77,22 +80,40 @@
 ;; the running CeTTa, to start workers and nested evaluations with
 (= (cetta) (system:executable))
 
+;; One reader owns stdin for this loop. Short-lived channel workers only
+;; receive completed lines, so their timeout cannot discard a partial line.
+!(bind! &terminal-reader (new-state none))
+!(bind! &terminal-runtime (new-state ""))
+(= (terminal:ready $directory $left)
+   (if (fs:is-file (str:concat $directory "/ready")) true
+     (if (<= $left 0) (Error terminal "input reader did not start")
+       (progn (sleep 0.01) (terminal:ready $directory (- $left 1))))))
+(= (terminal:ensure)
+   (if (not (== (get-state &terminal-runtime) "")) true
+     (let* (($directory (runtime-file ".terminal"))
+            (() (fs:make-directories $directory 448))
+            ($reader (proc:spawn ((cetta) "--lang" "petta" "--no-results"
+                                  (fs:canonical-path "terminal_reader.metta") $directory)
+                                 ((lifetime owner) (stdin inherit) (group caller)
+                                  (stdout null) (stderr null)))))
+       (case $reader
+         (((proc:failed $kind $why) (Error terminal $why))
+          ($owned (progn (change-state! &terminal-reader $owned)
+                         (change-state! &terminal-runtime $directory)
+                         (terminal:ready $directory 100))))))))
+
 ;; a fresh file in the loop's private directory .runtime/
 (= (runtime-file $suffix)
    (let () (fs:make-directories ".runtime" 448)
         (str-cat ((fs:canonical-path ".runtime") "/" (system:uuid4-hex) $suffix))))
 
-;; A worker's output is discarded, and a timeout kills its process group. The
-;; terminal is the loop's: its receive reads the loop's standard input, from
-;; the loop's process group so that it can read a terminal, and a call that
-;; sends to the terminal writes to the loop's standard output.
+;; A worker's output is discarded, and a timeout kills its process group.
+;; Terminal input belongs to the persistent reader; sends inherit stdout.
 (= (worker-options $path $function $kwargs $timeout)
    (cons-atom (timeout-ms (round-math (* $timeout 1000)))
-              (if (and (== (module-name $path) "terminal") (== $function "receive"))
-                  ((stdin inherit) (group caller) (stdout null) (stderr null))
-                  (if (== (json:get $kwargs "channel") "terminal")
+              (if (== (json:get $kwargs "channel") "terminal")
                       ((stdout inherit) (stderr null))
-                      ((stdout null) (stderr null))))))
+                      ((stdout null) (stderr null)))))
 
 ;; Popen.returncode: the exit status, or the negated signal
 (= (exit-code $termination)
@@ -111,9 +132,12 @@
       ((proc:result $termination $cause $out $err $capture)
        (let $output (json:parse (fs:read-text $result_file))
             (case $output
-              (((JsonObject $pairs) (if (== (json:get $output "ok") true)
+              (((JsonObject $pairs) (progn
+                                      (let $terminal (json:get $output "terminal_output")
+                                        (if (is-string $terminal) (system:write stdout $terminal) ()))
+                                      (if (== (json:get $output "ok") true)
                                         (ok (json:get $output "result"))
-                                        (error (json:get $output "error"))))
+                                        (error (json:get $output "error")))))
                ($invalid (error (str-cat ("Dynamic process exited with code " (exit-code $termination) " without a valid result"))))))))
       ((proc:failed $kind $reason)
        (error (str-cat ("cannot start the worker: " $reason)))))))
@@ -121,6 +145,7 @@
 (= (run-worker $path $function $args $kwargs $request_file $result_file $timeout)
    (let $request (json:stringify (JsonObject ((JsonPair "module" $path) (JsonPair "function" $function)
                                               (JsonPair "args" (JsonArray $args)) (JsonPair "kwargs" $kwargs)
+                                              (JsonPair "terminal" (get-state &terminal-runtime))
                                               (JsonPair "result" $result_file))))
         (case (fs:write $request_file $request)
           ((() (worker-answer (proc:run ((cetta) "--lang" "petta" "--no-results" (fs:canonical-path "iter_worker.metta") $request_file)
@@ -130,12 +155,14 @@
 
 ;; returns (ok result) or (error "text")
 (= (invoke_dynamic $path $function $args $kwargs $timeout)
-   (let* (($request_file (runtime-file ".json"))
+   (case (if (and (== $path "channels/terminal.metta") (== $function "receive")) (terminal:ensure) true)
+     (((Error $what $why) (error (error_text (Error $what $why))))
+      (true (let* (($request_file (runtime-file ".json"))
           ($result_file (runtime-file ".json"))
           ($outcome (run-worker $path $function $args $kwargs $request_file $result_file $timeout)))
      (progn (fs:remove $request_file)
             (fs:remove $result_file)
-            $outcome)))
+            $outcome))))))
 
 (= (no-kwargs) (JsonObject ()))
 

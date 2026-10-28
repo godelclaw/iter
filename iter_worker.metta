@@ -102,10 +102,12 @@
 ;; A Python module runs in this process's Python, which writes the result.
 (= (worker:python $request_file)
    (let $helper (import! &self iter_python.py)
-        (py-call (iter_python.invoke $request_file))))
+        (py-call (iter_python.invoke $request_file (system:executable)))))
 
 !(let* (($request_file (car-atom (system:args)))
-        ($request (json:parse (fs:read-text $request_file))))
+        ($request (json:parse (fs:read-text $request_file)))
+        ($terminal (json:get $request "terminal"))
+        ($configured (if (is-string $terminal) (change-state! &terminal-runtime $terminal) ())))
    (if (str:ends-with (json:get $request "module") ".py")
        (worker:python $request_file)
        (let $outcome (collapse (once (worker:serve $request)))

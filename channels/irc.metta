@@ -3,7 +3,7 @@
 (= (irc:env $name $default) (system:getenv-or-default $name $default))
 (= (irc:root) (irc:env "ITER_IRC_RUNTIME" "channels/.runtime/irc"))
 (= (irc:path $name) (str-cat ((irc:root) "/" $name)))
-(= (irc:host-setting) (irc:env "ITER_IRC_HOST" "irc.quakenet.org"))
+(= (irc:host-setting) (irc:env "ITER_IRC_HOST" ""))
 (= (irc:scheme)
    (if (str:starts-with (irc:host-setting) "tls://") "tls"
      (if (str:starts-with (irc:host-setting) "tcp://") "tcp" (irc:env "ITER_IRC_SCHEME" "tcp"))))
@@ -199,10 +199,11 @@
    (foldl-atom (str:split "\n" (str:join "\n" (str:split "\r" $content))) () $acc $line
      (append $acc (irc:chunks $line (- 510 (str:byte-length (irc:prefix)))))))
 (= (receive)
-   (if (irc:config-ok)
+   (if (== (irc:host-setting) "") ""
+    (if (irc:config-ok)
      (let* ((true (irc:directories)) (true (irc:ensure true 40)))
        (str:join "\n" (filter-atom (map-atom (irc:files (irc:path "inbox")) $path (irc:take $path))
-                                  $message (not (== $message ""))))) (irc:error "Invalid IRC configuration")))
+                                  $message (not (== $message ""))))) (irc:error "Invalid IRC configuration"))))
 (= (send $content)
    (if (and (irc:config-ok) (is-string $content))
      (if (and (<= (str:byte-length $content) 65536)
