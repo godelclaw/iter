@@ -84,12 +84,29 @@
 ;; receive completed lines, so their timeout cannot discard a partial line.
 !(bind! &terminal-reader (new-state none))
 !(bind! &terminal-runtime (new-state ""))
+!(bind! &terminal-error (new-state ""))
 (= (terminal:ready $directory $left)
-   (if (fs:is-file (str:concat $directory "/ready")) true
-     (if (<= $left 0) (Error terminal "input reader did not start")
+   (if (fs:is-file (str:concat $directory "/ready")) ready
+     (if (<= $left 0) pending
        (progn (sleep 0.01) (terminal:ready $directory (- $left 1))))))
+(= (terminal:observe)
+   (let $reader (get-state &terminal-reader)
+     (if (== $reader none) true
+       (case (proc:poll $reader)
+         ((proc:pending true)
+          ((proc:result $termination $cause $out $err $capture)
+           (let $normal (and (== $termination (proc:exited 0))
+                            (fs:is-file (str:concat (get-state &terminal-runtime) "/eof")))
+             (progn
+               (if (or $normal (fs:is-file (str:concat (get-state &terminal-runtime) "/error"))) ()
+                   (change-state! &terminal-error "input reader ended without an EOF marker"))
+               (change-state! &terminal-reader none)
+               (proc:close $reader) true)))
+          ($failed (progn (change-state! &terminal-error "input reader status is unavailable")
+                          (change-state! &terminal-reader none)
+                          (proc:close $reader) true)))))))
 (= (terminal:ensure)
-   (if (not (== (get-state &terminal-runtime) "")) true
+   (if (not (== (get-state &terminal-runtime) "")) (terminal:observe)
      (let* (($directory (runtime-file ".terminal"))
             (() (fs:make-directories $directory 448))
             ($reader (proc:spawn ((cetta) "--lang" "petta" "--no-results"
@@ -100,7 +117,8 @@
          (((proc:failed $kind $why) (Error terminal $why))
           ($owned (progn (change-state! &terminal-reader $owned)
                          (change-state! &terminal-runtime $directory)
-                         (terminal:ready $directory 100))))))))
+                         (terminal:ready $directory 100)
+                         (terminal:observe))))))))
 
 ;; a fresh file in the loop's private directory .runtime/
 (= (runtime-file $suffix)
@@ -146,6 +164,7 @@
    (let $request (json:stringify (JsonObject ((JsonPair "module" $path) (JsonPair "function" $function)
                                               (JsonPair "args" (JsonArray $args)) (JsonPair "kwargs" $kwargs)
                                               (JsonPair "terminal" (get-state &terminal-runtime))
+                                              (JsonPair "terminal_error" (get-state &terminal-error))
                                               (JsonPair "result" $result_file))))
         (case (fs:write $request_file $request)
           ((() (worker-answer (proc:run ((cetta) "--lang" "petta" "--no-results" (fs:canonical-path "iter_worker.metta") $request_file)

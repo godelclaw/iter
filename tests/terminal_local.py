@@ -32,7 +32,13 @@ def main():
 !(println! (THIRD (invoke_dynamic "channels/terminal.metta" "receive" () (no-kwargs) 1)))
 !(println! (PENDING (fs:is-file (str:concat (get-state &terminal-runtime) "/_incomplete.json"))))
 !(fs:write (str:concat (get-state &terminal-runtime) "/error") "fixture-reader-fault")
+!(fs:write (str:concat (get-state &terminal-runtime) "/99999999999999999999.json") (json:stringify "queued before fault"))
+!(println! (QUEUED (invoke_dynamic "channels/terminal.metta" "receive" () (no-kwargs) 1)))
 !(println! (FAULT (invoke_dynamic "channels/terminal.metta" "receive" () (no-kwargs) 1)))
+!(if (== (system:getenv-or-default "TERMINAL_TEST_ABORT_OWNER" "0") "1")
+     (progn (fs:remove (str:concat (get-state &terminal-runtime) "/error"))
+            (proc:cancel (get-state &terminal-reader)) (sleep 0.1)
+            (println! (STOPPED (invoke_dynamic "channels/terminal.metta" "receive" () (no-kwargs) 1)))) ())
 ''')
     results = []
     for mode in ("pipe", "raw-pty"):
@@ -45,6 +51,7 @@ def main():
         with (evidence / (mode + ".log")).open("wb") as log:
             child = subprocess.Popen([str(args.binary.resolve()), "--lang", "petta", str(program)],
                 cwd=root, stdin=slave if slave is not None else subprocess.PIPE,
+                env={**os.environ, "TERMINAL_TEST_ABORT_OWNER": "1" if master is not None else "0"},
                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                 preexec_fn=acquire_terminal if slave is not None else None)
             if slave is not None:
@@ -81,7 +88,10 @@ def main():
         assert '(SECOND (ok "' + expected + '"))' in output, output
         assert '(THIRD (ok ""))' in output, output
         assert '(PENDING true)' in output, output
+        assert '(QUEUED (ok "queued before fault"))' in output, output
         assert '(FAULT (error "terminal: fixture-reader-fault"))' in output, output
+        if mode == "raw-pty":
+            assert '(STOPPED (error "terminal: input reader ended without an EOF marker"))' in output, output
         results.append({"mode": mode, "passed": True, "exit": child.returncode,
             "split_utf8": True, "worker_cancellation": True, "eof_fragment": mode == "pipe"})
     (evidence / "outcome.json").write_text(json.dumps(results, indent=2) + "\n")

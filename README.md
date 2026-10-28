@@ -29,13 +29,21 @@ The module formats, which the agent uses to extend itself, are in
 
 ## Running
 
-Use a Linux build of CeTTa with HTTP (`make ENABLE_HTTP=1`), which places
+Build [CeTTa](https://github.com/godelclaw/CeTTa/tree/cetta-ours) from its
+checkout with the native HTTP features:
+
+```sh
+make BUILD=core ENABLE_HTTP=1 ENABLE_LIB_PROLOG=0 ENABLE_SQLITE=0 \
+     ENABLE_DURABLE=0 ENABLE_JSON_GSLT=1 ENABLE_MANAGED_SYMBOLS=1
+```
+
+This places
 `cetta.proc-scope` beside the binary. It needs `system:executable`,
 `system:read-line` with a timeout, the process library's `inherit` and `null`
 standard streams and its `run` and `detached` lifetimes, and `fs:lock`'s
 `exclusive-nowait`. Python modules also need a Python build (`BUILD=python`)
-whose `py-call` returns Python text as strings. Configure the model as upstream
-does:
+whose `py-call` returns Python text as strings. From the Iter checkout,
+configure the model as upstream does:
 
 ```sh
 export LLM_MODEL=... BASE_URL=... AI_API_KEY=...
