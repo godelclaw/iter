@@ -1,0 +1,5 @@
+!(import! &self "../../lib_context.metta")
+(= (helper $messages $tools $history $state $stamp)
+   (case (ctx:history-transform $messages $tools $history $state $stamp)
+     ((($new $kept) (worker-wire-json (JsonArray ($new $kept))))
+      ($failure $failure))))

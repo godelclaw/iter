@@ -61,6 +61,8 @@ def main():
         transcript_identity = hashlib.sha256(data).hexdigest()
         with args.transcript.open(encoding="utf-8") as handle:
             transcript = "transcript:\n" + "".join(handle.readlines()[-6:]).rstrip()
+    next_transcript = [transcript]
+    transcript_checks = []
     (evidence / "source-adaptations.json").write_text(json.dumps(
         {"enable_python_tool": args.python_tools, "seed_history_size": args.history_size,
          "seed_alarms": args.alarms,
@@ -94,6 +96,15 @@ def main():
                     assert "enable_thinking" not in body
                 else:
                     assert body.get("enable_thinking") is (args.enable_thinking == "true")
+                if transcript is not None:
+                    first = body["messages"][0]
+                    assert first["role"] == "system" and first["content"].endswith(next_transcript[0]), first
+                    assert first["content"].count("transcript:\n") == 1, first
+                    transcript_checks.append(next_transcript[0])
+                    # The writer transformation runs after the tail reader. Its
+                    # completed file is therefore the next request's input.
+                    with (source / "transcript.txt").open(encoding="utf-8") as handle:
+                        next_transcript[0] = "transcript:\n" + "".join(handle.readlines()[-6:]).rstrip()
                 if number == 0:
                     message = {"role": "assistant", "content": "retry me"}
                     finish = "length"
@@ -167,12 +178,15 @@ def main():
                 assert len(observed) == 1, observed
                 assert "[terminal]" in observed[0]["content"]
             if transcript is not None:
-                for request in requests:
-                    first = request["body"]["messages"][0]
-                    assert first["role"] == "system" and first["content"].endswith(transcript), first
-                    assert first["content"].count("transcript:\n") == 1, first
-                assert hashlib.sha256((source / "transcript.txt").read_bytes()).hexdigest() == transcript_identity
-            assert "OUTPUT TOKEN LIMIT REACHED" in requests[1]["body"]["messages"][-1]["content"]
+                assert len(transcript_checks) == len(requests)
+                if (source / "transformations/transcript.metta").exists():
+                    assert "hello fixture" in (source / "transcript.txt").read_text()
+                else:
+                    assert hashlib.sha256((source / "transcript.txt").read_bytes()).hexdigest() == transcript_identity
+            assert any("OUTPUT TOKEN LIMIT REACHED" in str(message.get("content", ""))
+                       for message in requests[1]["body"]["messages"])
+            assert not any("[RUNTIME ERROR in " in str(message.get("content", ""))
+                           for request in requests for message in request["body"]["messages"])
             assert any("hello fixture" in str(m.get("content", "")) for m in experience if m["role"] == "user")
             receipts = [m for m in experience if m["role"] == "tool"]
             assert len(receipts) == len(script)

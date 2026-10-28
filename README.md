@@ -137,6 +137,38 @@ descriptor-cleanup checks. `tests/transcript_tail_local.py --help` describes the
 comparison with the Python reference through fresh workers, which needs a copy
 of that reference and optionally measures long prefixes.
 
+## Context logs and history
+
+The native `transcript`, `unbounded_log` and `history` transformations preserve
+the pinned erayindex selection and window-state rules. Their default files live
+outside the bounded `memory/` prompt input:
+
+| Transformation | Log | State | Overrides |
+| --- | --- | --- | --- |
+| transcript | `transcript.txt` | `.transcript_state` | `ITER_TRANSCRIPT_PATH`, `ITER_TRANSCRIPT_STATE` |
+| unbounded_log | `unbounded_log.txt` | `.log_state` | `ITER_LOG_PATH`, `ITER_LOG_STATE` |
+| history | `history.metta` | `.history_state` | `ITER_HISTORY_PATH`, `ITER_HISTORY_STATE` |
+
+The transcript selects user text and assistant `send` calls. The unbounded log
+selects text from every role. Both filter the source's control substrings from
+user messages and compare hashes with the preceding context window. Repeated
+messages within a new window can therefore produce repeated lines; messages
+that leave the window and later return can be logged again. History also
+suppresses duplicates within one call and retains the source's text/key escaping.
+State-key order is deterministic; log-line order remains the original order.
+
+Log appends and state writes are separate operations. A crash between them can
+repeat entries. Transcript/unbounded-log failures are best-effort, as in their
+source; history reports failures. These modules treat log text as data and do
+not evaluate it. Concurrent writers and crash-atomic delivery are not supplied
+by this compatibility port.
+
+`tests/context_logs_local.py`, `tests/history_local.py` and
+`tests/context_faults_local.py` compare outputs and files with the pinned Python
+sources in isolated workspaces. `tests/context_negative.py` checks deliberately
+broken ordering, multiplicity and state pruning. Each accepts `--binary` and a
+new `--evidence` directory; candidate source files must be tracked or staged.
+
 ## Alarms
 
 `tools/reminder.metta` creates an alarm from a local `YYYY-MM-DD HH:MM:SS`
