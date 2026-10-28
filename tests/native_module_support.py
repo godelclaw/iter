@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 
 
 def value_equal(left, right):
@@ -41,6 +42,12 @@ class NativeModules:
             shutil.copy2(self.root / name, target)
             sources[name] = hashlib.sha256(target.read_bytes()).hexdigest()
         (self.evidence / "sources.json").write_text(json.dumps(sources, indent=2) + "\n")
+        companion = self.binary.with_name(self.binary.name + ".proc-scope")
+        (self.evidence / "engine.json").write_text(json.dumps({
+            "path": str(self.binary), "sha256": hashlib.sha256(self.binary.read_bytes()).hexdigest(),
+            "companion_sha256": hashlib.sha256(companion.read_bytes()).hexdigest() if companion.exists() else None,
+            "python_oracle_version": sys.version,
+        }, indent=2) + "\n")
 
     def call(self, module, function, args=None, kwargs=None, env=None, args_json=None, timeout=30):
         self.count += 1

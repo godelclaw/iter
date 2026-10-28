@@ -169,6 +169,29 @@ sources in isolated workspaces. `tests/context_negative.py` checks deliberately
 broken ordering, multiplicity and state pruning. Each accepts `--binary` and a
 new `--evidence` directory; candidate source files must be tracked or staged.
 
+`tool_reliability_tracker.metta` updates the NAL scores in
+`transformations/.runtime/tool_reliability.json`; `ITER_RELIABILITY_DIR`
+overrides that directory for both the tracker and `tools/tool_reliability.metta`.
+It preserves the source's observation counting: a result can be counted again
+when a context window is replayed. The score is a text-based tool-result
+heuristic, not a probability guarantee. The source's separate file reads and
+writes remain separate here; concurrent writers can lose updates. Tool names
+and nonempty tool-result contents must be strings. Missing/corrupt JSON and I/O
+failure handling are qualified separately from malformed field errors.
+
+`atom_space_update.metta` updates an **existing** file at
+`transformations/.runtime/space.metta`, or `ITER_SPACE_PATH`. It extracts
+`Formalization:` lines and nearby `STV:` text, puts new entries first, removes
+duplicates and retains at most 500 lines including the header. Its inherited
+parenthesis checks are heuristics, not complete syntax validation or proof
+checking. Text remains inert. The workspace paths replace the Python modules'
+fixed home paths; neither module creates a second agent installation.
+
+`tests/reliability_local.py` and `tests/formalizations_local.py` compare these
+modules with the pinned Python sources; `tests/state_negative.py` checks
+separating mutations in boundaries, revision weights, occurrence counts,
+lookback, ordering and limits. Use the same `--binary`/`--evidence` arguments.
+
 ## Alarms
 
 `tools/reminder.metta` creates an alarm from a local `YYYY-MM-DD HH:MM:SS`
