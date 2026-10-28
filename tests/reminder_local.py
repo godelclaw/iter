@@ -32,6 +32,8 @@ def cases():
                "2026-01-01 00:00:00 ", " 2026-01-01 00:00:00", "2026-01-  1 00:00:00",
                "2026-01- 01 00:00:00", "2026-٠١-01 00:00:00", "2026-01-3١ 00:00:00",
                "2026-02-0٣ 04:05:06", "2026-02-٣ 04:05:06"]
+    invalid += ["2026-01-01 :00:00", "2026-01-01 x:00:00", "2026-01-01 ١٢:00:00",
+                "2026-01-01 00::00", "2026-01-01 00:00:", "2026--01 00:00:00"]
     return valid + invalid
 
 
@@ -57,7 +59,7 @@ def main():
     workspace = evidence / "native"
     workspace.mkdir()
     source_hashes = {}
-    for name in subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root).decode().strip("\0").split("\0"):
+    for name in subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().strip("\0").split("\0"):
         destination = workspace / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, destination)

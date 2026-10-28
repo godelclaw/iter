@@ -24,17 +24,17 @@
 ;; Match the accepted fields of strptime's numeric date format. Some leading
 ;; digits are ASCII ranges while a trailing digit may be Unicode Nd.
 (= (calendar:field $kind $text)
-   (and (calendar:digits $text 1 2)
+   (if (calendar:digits $text 1 2)
      (if (== $kind month) (str:is-all-in digit $text)
        (if (== (str:char-length $text) 1) (if (== $kind day) (str:is-all-in digit $text) true)
          (let* (($first (str:char-slice $text 0 1)) ($last (str:char-slice $text 1 2)))
-           (and (str:is-all-in digit $first)
+           (if (str:is-all-in digit $first)
              (let $n (str:string->number $first)
                (case $kind
                  ((day (or (is-member $n (1 2))
                            (and (is-member $n (0 3)) (str:is-all-in digit $last))))
                   (hour (or (<= $n 1) (and (== $n 2) (str:is-all-in digit $last))))
-                  ($other (<= $n 5)))))))))))
+                  ($other (<= $n 5))))) false)))) false))
 (= (calendar:leap $year)
    (and (== (% $year 4) 0) (or (not (== (% $year 100) 0)) (== (% $year 400) 0))))
 (= (calendar:month-days $year $month)
