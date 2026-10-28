@@ -91,10 +91,14 @@
 ;; Python's str.isspace code points, for rstrip: Zs, Zl, Zp and the controls
 ;; of bidirectional class B, S or WS.
 (= (transcript-tail:space)
-   (str:set (map-atom (9 10 11 12 13 28 29 30 31 32 133 160 5760
-                       8192 8193 8194 8195 8196 8197 8198 8199 8200 8201 8202
-                       8232 8233 8239 8287 12288)
-                      $code (str:from-codepoints ($code)))))
+   (str:set (transcript-tail:scalars (9 10 11 12 13 28 29 30 31 32 133 160 5760
+                                      8192 8193 8194 8195 8196 8197 8198 8199 8200 8201 8202
+                                      8232 8233 8239 8287 12288))))
+(= (transcript-tail:scalars $codes)
+   (if (== $codes ())
+       ()
+       (let ($code $rest) (decons-atom $codes)
+         (cons-atom (str:from-codepoints ($code)) (transcript-tail:scalars $rest)))))
 
 ;; The text without trailing whitespace. The last scalar is at most three
 ;; bytes, so each step looks only at the windows that end at the cut.
@@ -182,21 +186,38 @@
                 (str:join "\n" (str:split "\r\n" $text))))))))
 
 ;; $pieces are the parts of the text between LFs: all but the last are
-;; complete lines, the first continuing the line in progress.
+;; complete lines, the first continuing the line in progress. Only the last
+;; six complete lines can matter, and they are read by index, so a chunk of
+;; very many short lines costs no more than a copy of its text.
 (= (transcript-tail:absorb $recent $fragments $held $pieces)
    (let $count (- (size-atom $pieces) 1)
      (if (== $count 0)
          (TranscriptTailV1 $recent (transcript-tail:push $fragments (car-atom $pieces)) $held)
-         (let* (($kept (transcript-tail:keep-last (list:take $count $pieces)))
-                ($whole (if (> $count (transcript-tail:lines))
-                            $kept
+         (let* (($from (if (> $count (transcript-tail:lines)) (- $count (transcript-tail:lines)) 0))
+                ($kept (transcript-tail:slice $pieces $from $count))
+                ($whole (if (== $from 0)
                             (cons-atom (str:join "" (list:reverse
                                          (transcript-tail:push $fragments (car-atom $kept))))
-                                       (cdr-atom $kept))))
-                ($lines (map-atom $whole $piece (str:concat $piece "\n"))))
+                                       (cdr-atom $kept))
+                            $kept))
+                ($lines (transcript-tail:terminate $whole)))
            (TranscriptTailV1 (transcript-tail:keep-last (list:append $recent $lines))
                              (transcript-tail:push () (index-atom $pieces $count))
                              $held)))))
+
+;; Each line with its LF.
+(= (transcript-tail:terminate $pieces)
+   (if (== $pieces ())
+       ()
+       (let ($head $tail) (decons-atom $pieces)
+         (cons-atom (str:concat $head "\n") (transcript-tail:terminate $tail)))))
+
+;; The items from index $from up to $to, at most the few that are kept.
+(= (transcript-tail:slice $items $from $to)
+   (if (>= $from $to)
+       ()
+       (cons-atom (index-atom $items $from)
+                  (transcript-tail:slice $items (+ $from 1) $to))))
 
 (= (transcript-tail:push $fragments $piece)
    (if (== $piece "") $fragments (cons-atom $piece $fragments)))

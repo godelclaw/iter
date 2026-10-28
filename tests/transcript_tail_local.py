@@ -143,6 +143,7 @@ def build_fixtures(directory):
         "boundary-space": text("keep" + " " * 3) + b"\n" + text("p" * (boundary - 8) + "\u3000\u2028 \n"),
         "exact-chunk": b"p" * (CHUNK - 1) + b"\n", "exact-chunks": (b"p" * (CHUNK - 1) + b"\n") * 2,
         "chunk-plus-one": b"p" * CHUNK + b"\n",
+        "tiny-lines": b"x\n" * 70000 + b"y", "tiny-cr-lines": b"x\r" * 70000, "many-blank-lines": b"\n" * 70000,
         "many-lines": b"".join(b"line %d\n" % n for n in range(70000)),
         "many-lines-unterminated": b"".join(b"line %d\r\n" % n for n in range(70000)) + b"tail",
         # malformed UTF-8
