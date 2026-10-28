@@ -29,51 +29,84 @@ The module formats, which the agent uses to extend itself, are in
 
 ## Running
 
-Build [CeTTa](https://github.com/godelclaw/CeTTa/tree/cetta-ours) from its
-checkout with the native HTTP features:
+Use the `cetta-ours` and `metta-native` branches explicitly. The core build
+requires a C compiler, make, Python 3 for build scripts, pkg-config, and libcurl
+and OpenSSL development files. GMP development files enable exact large integers.
+For example, Debian/Ubuntu provides these through `build-essential`, `python3`,
+`pkg-config`, `libcurl4-openssl-dev`, `libssl-dev` and `libgmp-dev` (plus `git`).
+Python is a build/test dependency here; the native Iter runtime does not embed it.
 
 ```sh
+git clone --branch cetta-ours --single-branch https://github.com/godelclaw/CeTTa.git CeTTa
+cd CeTTa
 make BUILD=core ENABLE_HTTP=1 ENABLE_LIB_PROLOG=0 ENABLE_SQLITE=0 \
      ENABLE_DURABLE=0 ENABLE_JSON_GSLT=1 ENABLE_MANAGED_SYMBOLS=1
+export CETTA_BIN="$PWD/cetta"
+cd ..
+git clone --branch metta-native --single-branch https://github.com/godelclaw/iter.git iter
+cd iter
 ```
 
-This places
-`cetta.proc-scope` beside the binary. It needs `system:executable`,
-`system:read-line` with a timeout, the process library's `inherit` and `null`
-standard streams and its `run` and `detached` lifetimes, and `fs:lock`'s
-`exclusive-nowait`. Python modules also need a Python build (`BUILD=python`)
-whose `py-call` returns Python text as strings. From the Iter checkout,
-configure the model as upstream does:
+Run the executable in its checkout so its matching `cetta.proc-scope` process
+companion and `lib/` tree stay available. If you package the runtime elsewhere,
+copy those with the executable from the same build, and refresh them together.
+Do not update the executable while leaving an older process companion beside it.
+
+Configure your endpoint, model and credential explicitly. The endpoint must
+support Chat Completions with tool calls; provider-specific model compatibility
+still needs testing. The base URL ends in `/v1`, without a trailing slash:
 
 ```sh
-export LLM_MODEL=... BASE_URL=... AI_API_KEY=...
-cetta --lang petta iter.metta
+export LLM_MODEL='YOUR_MODEL_ID'
+export BASE_URL='http://127.0.0.1:8000/v1'
+export AI_API_KEY='YOUR_ENDPOINT_KEY'
+"$CETTA_BIN" --lang petta iter.metta
 ```
 
-The other settings are at the top of `iter.metta`. Module calls exchange their
-requests and results through `.runtime/` in the working directory.
+`ITER_ENABLE_THINKING` is unset by default: no `enable_thinking` extension is
+sent. Set it to `true` or `false` only if your server documents that option.
+An invalid setting is a configuration error. The other settings are at the top
+of `iter.metta`. Module calls exchange requests/results through `.runtime/` in
+the Iter workspace. IRC stays idle until `ITER_IRC_HOST` is set.
 
 ## Tests
 
-From the repository root:
+From the Iter repository root, the recommended core build supports:
 
 ```sh
-cetta --lang petta tests/worker.metta < /dev/null
+"$CETTA_BIN" --lang petta tests/worker.metta < /dev/null
+"$CETTA_BIN" --lang petta tests/worker_wire.metta < /dev/null
+"$CETTA_BIN" --lang petta tests/llm_request.metta < /dev/null
+python3 tests/loop_local.py --binary "$CETTA_BIN" --evidence ./test-evidence/loop
 ```
 
-That full worker suite includes optional Python interoperability. The loop
-can also be checked with a core HTTP build, without Python or Prolog:
+The evidence directory must be new. The loop fixture uses a local HTTP server;
+no model credential or external service is needed. `--alarms` adds due/future
+alarm checks. `--enable-thinking true` checks the explicit provider extension
+against that fixture rather than assuming a public server accepts it.
+
+Python guest interoperability has a separate suite. Rebuild CeTTa with
+`BUILD=python` and Python development files, then run:
 
 ```sh
-python3 tests/loop_local.py --binary /path/to/cetta --evidence /new/evidence/directory
+"$CETTA_BIN" --lang petta tests/worker_python.metta < /dev/null
+python3 tests/loop_local.py --binary "$CETTA_BIN" --evidence ./test-evidence/python-loop --python-tools
 ```
 
-The fixture is a local HTTP server; no model credentials or external service
-are needed. Add `--python-tools` to also test the optional Python tool.
+To enable the optional Python tool for normal use, rename `tools/_python.py` to
+`tools/python.py`. Native tools, channels and transformations work with the core
+build. The worker regression accepts `ITER_TEST_REFUSED_URL` for a test-owned
+HTTP refusal target.
 
-The worker regression accepts `ITER_TEST_REFUSED_URL` for a harness-owned HTTP
-refusal target. `tests/irc_local.py --help` describes the separate isolated IRC
-fixture harness; it uses only numeric loopback TCP/TLS, not a public server.
+The standalone IRC unit test needs a local fixture configuration:
+
+```sh
+ITER_IRC_HOST=127.0.0.1 "$CETTA_BIN" --lang petta tests/irc_units.metta < /dev/null
+```
+
+Run it in a fresh test workspace because it writes local spool fixtures.
+`tests/irc_local.py --help` describes the full isolated TCP/TLS fixture harness;
+it does not connect to a public server.
 
 ## Transcript context
 
@@ -114,11 +147,16 @@ Iter workspace (the Python version's fixed module-relative path is the one
 deliberate difference); the time and the `Step` timestamp are native wall time
 and local time. `alarms:transform-at $messages $tools $directory $now $stamp`
 takes the directory, the time and the timestamp text directly.
+The current source-relative PeTTa import policy is required.
 
 - The directory is created when absent. Entries are handled in file-name (byte)
   order, not numeric order, and the time is read once: an alarm is due when
   `now >= target`, so an equal time is due. There is no limit on the number of
   entries or the size of a message.
+- Deadlines are rounded to binary64 as Python's `float(name)` does. Injected
+  integer clocks are compared exactly against that deadline; they are not
+  rounded up by a mixed numeric comparison. Non-finite injected clocks fail
+  before directory creation or deletion.
 - Admitted names are whole finite decimal numbers: an optional sign, digits with
   an optional point, and an optional exponent. Any other name, and any file not
   yet due, is left untouched. Python's `float` also takes underscores, outer
@@ -131,6 +169,8 @@ takes the directory, the time and the timestamp text directly.
   parsed or evaluated.
 - Existing messages and tools, unknown fields and duplicates pass through. The
   messages must be a JSON array, which is checked before any file is touched.
+  Worker requests and results preserve signed zero through CeTTa's native
+  Python-compatible JSON writer while retaining strict JSON validation.
 - A fault making or reading the directory, or reading, decoding or removing a
   file, is an explicit `(Error ...)` failure of the call, as the Python
   exception was. Alarms handled before the fault stay removed and the failing
@@ -140,12 +180,16 @@ takes the directory, the time and the timestamp text directly.
   messages, as in the reference, so a failure or an interruption after the
   removal loses that alarm's message. Nothing here is atomic or exactly-once;
   `tests/alarms_local.py` keeps executable witnesses.
+  A native worker unable to publish its result exits with status 1. That
+  reports the failure but does not recover alarms already removed.
 
 `cetta --lang petta tests/alarms.metta < /dev/null` and `... tests/text_helper.metta`
 run the unit and descriptor-cleanup checks (the output must hold no failed
 check). `tests/alarms_local.py --help` describes the comparison with the pinned
 Python reference through fresh workers, the negative controls and the
 measurements.
+`tests/loop_local.py --alarms` checks due-alarm context and future-alarm
+preservation in complete local model/tool turns, including a model retry.
 
 ## IRC
 

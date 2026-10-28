@@ -1,0 +1,8 @@
+!(import! &self "../utils.metta")
+(= (request $setting)
+   (iter-llm:request-with-thinking (JsonArray ()) (JsonArray ()) "fixture" 7 $setting))
+!(test (is-member "enable_thinking" (object-keys (json:parse (request "")))) false)
+!(test (json:get (json:parse (request "true")) "enable_thinking") true)
+!(test (json:get (json:parse (request "false")) "enable_thinking") false)
+!(test (request "maybe") (Error "Configuration" "ITER_ENABLE_THINKING must be true, false, or unset"))
+!(test (json:get (json:parse (request "")) "max_tokens") 7)

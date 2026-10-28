@@ -20,6 +20,10 @@ def main():
     parser.add_argument("--history-size", type=int, default=0)
     parser.add_argument("--transcript", type=Path,
                         help="valid UTF-8 fixture copied into the loop workspace")
+    parser.add_argument("--alarms", action="store_true",
+                        help="seed due and future alarms and check the complete model turn")
+    parser.add_argument("--enable-thinking", choices=("true", "false"),
+                        help="exercise the explicit provider extension")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
@@ -42,6 +46,11 @@ def main():
         (source / "experience.json").write_text(json.dumps([
             {"role": "user", "content": f"old fixture {number}"}
             for number in range(args.history_size)]))
+    if args.alarms:
+        alarms = source / "memory/alarms"
+        alarms.mkdir(parents=True)
+        (alarms / "0").write_text("terminal\nfixture alarm")
+        (alarms / "99999999999").write_text("terminal\nfuture alarm")
     transcript = None
     transcript_identity = None
     if args.transcript:
@@ -52,6 +61,7 @@ def main():
             transcript = "transcript:\n" + "".join(handle.readlines()[-6:]).rstrip()
     (evidence / "source-adaptations.json").write_text(json.dumps(
         {"enable_python_tool": args.python_tools, "seed_history_size": args.history_size,
+         "seed_alarms": args.alarms,
          "transcript_sha256": transcript_identity}, indent=2) + "\n")
     script = [("send", {"channel": "terminal", "content": "fixture delivered"}),
               ("shell", {"cmd": "printf shell-proof"}),
@@ -75,6 +85,10 @@ def main():
                     "tenant": self.headers.get("X-APC-Tenant")})
                 assert self.path == "/v1/chat/completions"
                 assert self.headers.get("Authorization") == "Bearer fixture-only"
+                if args.enable_thinking is None:
+                    assert "enable_thinking" not in body
+                else:
+                    assert body.get("enable_thinking") is (args.enable_thinking == "true")
                 if number == 0:
                     message = {"role": "assistant", "content": "retry me"}
                     finish = "length"
@@ -101,6 +115,8 @@ def main():
     env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
            "LLM_MODEL": "fixture-model", "AI_API_KEY": "fixture-only",
            "BASE_URL": f"http://127.0.0.1:{peer.server_port}/v1", "ITER_IRC_HOST": ""}
+    if args.enable_thinking is not None:
+        env["ITER_ENABLE_THINKING"] = args.enable_thinking
     for key, name in (("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CONFIG_HOME", "config")):
         directory = evidence / name
         directory.mkdir(mode=0o700)
@@ -132,6 +148,14 @@ def main():
             assert len(requests) == len(script) + 1, requests
             assert len({r["session"] for r in requests}) == 1 and requests[0]["session"]
             assert all(r["tenant"] == "iter" and r["body"]["model"] == "fixture-model" for r in requests)
+            if args.alarms:
+                alarm_messages = [[m for m in request["body"]["messages"]
+                                   if isinstance(m.get("content"), str) and "[ALARM] fixture alarm" in m["content"]]
+                                  for request in requests]
+                assert len(alarm_messages[0]) == 1
+                assert sum(map(len, alarm_messages)) == 1, alarm_messages
+                assert not (alarms / "0").exists()
+                assert (alarms / "99999999999").read_text() == "terminal\nfuture alarm"
             if transcript is not None:
                 for request in requests:
                     first = request["body"]["messages"][0]

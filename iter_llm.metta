@@ -23,12 +23,27 @@
    (JsonObject (filter-atom $pairs $pair (let (JsonPair $key $value) $pair (not (== $value JsonNull))))))
 
 (= (iter-llm:request $messages $tools $model $max_tokens)
-   (json:stringify (JsonObject ((JsonPair "model" $model)
-                                (JsonPair "messages" $messages)
-                                (JsonPair "tools" $tools)
-                                (JsonPair "tool_choice" "required")
-                                (JsonPair "max_tokens" $max_tokens)
-                                (JsonPair "enable_thinking" true)))))
+   (iter-llm:request-with-thinking $messages $tools $model $max_tokens
+     (system:getenv-or-default "ITER_ENABLE_THINKING" "")))
+
+;; This is a provider extension, so an unset option omits it from the request.
+(= (iter-llm:thinking $setting)
+   (case $setting
+     (("" ())
+      ("true" ((JsonPair "enable_thinking" true)))
+      ("false" ((JsonPair "enable_thinking" false)))
+      ($other (Error "Configuration" "ITER_ENABLE_THINKING must be true, false, or unset")))))
+
+(= (iter-llm:request-with-thinking $messages $tools $model $max_tokens $setting)
+   (case (iter-llm:thinking $setting)
+     (((Error $what $why) (Error $what $why))
+      ($extension
+       (json:stringify
+         (JsonObject (append ((JsonPair "model" $model)
+                              (JsonPair "messages" $messages)
+                              (JsonPair "tools" $tools)
+                              (JsonPair "tool_choice" "required")
+                              (JsonPair "max_tokens" $max_tokens)) $extension)))))))
 
 ;; returns message finish_reason response usage, as utils.py did
 (= (iter-llm:answer $text)
@@ -57,11 +72,15 @@
       ($other (Error "Transport" (text $other))))))
 
 (= (chat_completion $messages $tools $model $max_tokens)
+   (case (iter-llm:request $messages $tools $model $max_tokens)
+     (((Error $what $why) (Error $what $why))
+      ($body (iter-llm:submit-body $body)))))
+
+(= (iter-llm:submit-body $body)
    (let* (((client $base $key $timeout $session) (get-state &iter_llm_client))
           ($url (str:concat $base "/chat/completions"))
           ($authorization (str:concat "Bearer " $key))
           ($milliseconds (* $timeout 1000))
-          ($body (iter-llm:request $messages $tools $model $max_tokens))
           ;; http:request is data: bind the complete request before submitting it.
           ($headers ((http:header "Content-Type" "application/json")
                      (http:header "Authorization" $authorization)

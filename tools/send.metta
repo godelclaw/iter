@@ -18,10 +18,11 @@
                      (send:python $python $content)
                      (str-cat ("Unknown channel: " $channel))))
             (let $module (fs:canonical-path $path)
-                 (case (collapse (import! &self $module))
+                 (case (collapse (catch (import! &self $module)))
                    (((true) (let* (($call (cons-atom send (cons-atom $content ())))
                                    ($sent (eval $call)))
                               (case $sent
                                 (((Error $what $why) $sent)
                                  ($done (if (== $sent $call) (str-cat ("Channel " $channel " cannot send")) "SUCCESS"))))))
+                    (((Error $what $why)) (Error $path (str:concat "the channel module could not be loaded: " (error_text (Error $what $why)))))
                     ($none (Error $path "the channel module could not be loaded"))))))))

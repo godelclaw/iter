@@ -48,6 +48,12 @@
 ;; send goes through a channel module; the terminal's line goes to standard output
 !(test (run-tool "tools/send.metta" (kwargs2 "channel" "terminal" "content" "hi")) (ok "SUCCESS"))
 !(test (run-tool "tools/send.metta" (kwargs2 "channel" "nowhere" "content" "hi")) (ok "Unknown channel: nowhere"))
+!(test (let* ((() (fs:write "channels/_broken_test.metta" (fs:read-text "tests/fixtures/broken.metta")))
+              ($answer (run-tool "tools/send.metta" (kwargs2 "channel" "_broken_test" "content" "hi")))
+              ($cleaned (fs:remove "channels/_broken_test.metta")))
+         (case $answer
+           (((error $why) (str:starts-with $why "channels/_broken_test.metta: the channel module could not be loaded"))
+            ($other false)))) true)
 
 ;; channels: the terminal has nothing waiting on /dev/null
 !(test (call "channels/terminal.metta" "receive" () (no-kwargs)) (ok ""))
@@ -74,28 +80,6 @@
              (((ok (JsonArray ($messages $tools))) (contents $messages))))
        ("s" "[stamp]"))
 !(test (call "tests/fixtures/refuse.metta" "transform" ((one-message) (JsonArray ())) (no-kwargs)) (error "transform: refused"))
-
-;; Python modules, in the format of Python Iter, run in the worker's Python
-!(test (json:get (metadata "tools/_python.py") "parameters") (JsonArray ("code")))
-!(test (run-tool "tools/_python.py" (kwargs1 "code" "print(6 * 7)")) (ok "42\n"))
-!(test (run-tool "tools/_python.py" (kwargs1 "code" "print(shell('printf native-from-python'))"))
-       (ok "SUCCESS, RETURN: native-from-python\n"))
-!(test (run-tool "tools/_python.py" (kwargs1 "code" "print(nop())")) (ok "SUCCESS\n"))
-!(test (run-tool "tools/_python.py" (kwargs1 "code" "os.chdir('/'); print(shell('printf still-native'))"))
-       (ok "SUCCESS, RETURN: still-native\n"))
-!(test (run-tool "tests/fixtures/pyerror.py" (no-kwargs)) (error "ValueError: the widget is missing"))
-!(test (call "tests/fixtures/pychannel.py" "receive" () (no-kwargs)) (ok "from python"))
-!(test (case (call "tests/fixtures/pystamp.py" "transform" ((one-message) (JsonArray ())) (no-kwargs))
-             (((ok (JsonArray ($messages $tools))) (contents $messages))))
-       ("s" "[py stamp]"))
-;; the send tool reaches a Python channel; the channel's name keeps it out of
-;; the loop's channels
-!(test (let* ((() (fs:write "channels/_pytest_channel.py" (fs:read-text "tests/fixtures/pychannel.py")))
-              ($sent (run-tool "tools/send.metta" (kwargs2 "channel" "_pytest_channel" "content" "to python")))
-              ($seen (fs:read-text ".runtime/pychannel-sent"))
-              ($cleaned (progn (fs:remove "channels/_pytest_channel.py") (fs:remove ".runtime/pychannel-sent"))))
-         ($sent $seen))
-       ((ok "SUCCESS") "to python"))
 
 ;; a call past its time is killed with everything it started
 !(test (invoke_dynamic "tools/shell.metta" "run" () (kwargs1 "cmd" "sleep 31.7 & sleep 32.9") 1) (error "TIMEOUT after 1s"))
@@ -149,7 +133,7 @@
 !(test (iter-llm:answer "{\"error\": \"overloaded\"}") (Error "Response" "not a chat completion"))
 !(test (json:parse (iter-llm:request (JsonArray ()) (JsonArray ()) "m" 7))
        (JsonObject ((JsonPair "model" "m") (JsonPair "messages" (JsonArray ())) (JsonPair "tools" (JsonArray ()))
-                    (JsonPair "tool_choice" "required") (JsonPair "max_tokens" 7) (JsonPair "enable_thinking" true))))
+                    (JsonPair "tool_choice" "required") (JsonPair "max_tokens" 7))))
 !(test (size-atom (str:split "-" (iter-llm:uuid4))) 5)
 ;; nothing listens at the refusal target; a harness that reserves a port of
 ;; its own names it in ITER_TEST_REFUSED_URL
