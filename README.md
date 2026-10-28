@@ -104,6 +104,49 @@ descriptor-cleanup checks. `tests/transcript_tail_local.py --help` describes the
 comparison with the Python reference through fresh workers, which needs a copy
 of that reference and optionally measures long prefixes.
 
+## Alarms
+
+`transformations/alarms.metta` is the native port of Iter's `alarms.py`: each
+file in the alarm directory whose name is a decimal epoch time that has come
+becomes a user message `Step STAMP: [CHANNEL] [ALARM] MESSAGE`, and the file is
+removed. The directory is `ITER_ALARMS_DIR`, by default `memory/alarms` in the
+Iter workspace (the Python version's fixed module-relative path is the one
+deliberate difference); the time and the `Step` timestamp are native wall time
+and local time. `alarms:transform-at $messages $tools $directory $now $stamp`
+takes the directory, the time and the timestamp text directly.
+
+- The directory is created when absent. Entries are handled in file-name (byte)
+  order, not numeric order, and the time is read once: an alarm is due when
+  `now >= target`, so an equal time is due. There is no limit on the number of
+  entries or the size of a message.
+- Admitted names are whole finite decimal numbers: an optional sign, digits with
+  an optional point, and an optional exponent. Any other name, and any file not
+  yet due, is left untouched. Python's `float` also takes underscores, outer
+  whitespace, `inf`/`nan` and non-ASCII digits; those names are left alone here,
+  where Python would use some of them.
+- A file is decoded as strict UTF-8 with CR, LF and CRLF read as LF and
+  stripped at both ends as Python's `str.strip` does (`lib_text.metta`). With a
+  LF in the stripped text the first line is the channel and the rest the
+  message; otherwise the channel is `terminal`. The text is data and is never
+  parsed or evaluated.
+- Existing messages and tools, unknown fields and duplicates pass through. The
+  messages must be a JSON array, which is checked before any file is touched.
+- A fault making or reading the directory, or reading, decoding or removing a
+  file, is an explicit `(Error ...)` failure of the call, as the Python
+  exception was. Alarms handled before the fault stay removed and the failing
+  file stays. An unreadable directory is a failure here; Python's `glob` would
+  see it as empty.
+- **Not durable delivery.** A file is removed before the caller has accepted the
+  messages, as in the reference, so a failure or an interruption after the
+  removal loses that alarm's message. Nothing here is atomic or exactly-once;
+  `tests/alarms_local.py` keeps executable witnesses.
+
+`cetta --lang petta tests/alarms.metta < /dev/null` and `... tests/text_helper.metta`
+run the unit and descriptor-cleanup checks (the output must hold no failed
+check). `tests/alarms_local.py --help` describes the comparison with the pinned
+Python reference through fresh workers, the negative controls and the
+measurements.
+
 ## IRC
 
 `channels/irc.metta` uses native fs/proc/json/str/system/io through `utils.metta`.
