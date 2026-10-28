@@ -67,12 +67,15 @@
       ("transform" (worker:transformed (worker:apply transform $args)))
       ($other (worker:text (worker:apply (str:string->symbol $function) $args))))))
 
-;; import! answers nothing for a missing or malformed module.
+;; Explicit file imports raise on malformed source. Report that through the
+;; worker protocol, retaining diagnostics for an agent repairing its module.
 (= (worker:load $module)
    (if (fs:is-file $module)
        (let $path (fs:canonical-path $module)
-            (case (collapse (import! &self $path))
+            (case (collapse (catch (import! &self $path)))
               (((true) loaded)
+               (((Error $what $why))
+                (worker:failed (str-cat ("ImportError: " $module ": " (error_text (Error $what $why))))))
                ($none (worker:failed (str-cat ("ImportError: " $module " could not be loaded: check its parentheses, quotes and directives")))))))
        (worker:failed (str-cat ("FileNotFoundError: " $module)))))
 
@@ -93,7 +96,7 @@
 
 ;; json.dumps of the outcome; a value JSON cannot hold fails the call
 (= (worker:json $output)
-   (let $json (json:stringify $output)
+   (let $json (worker-wire-json $output)
         (if (is-string $json)
             $json
             (json:stringify (JsonObject ((JsonPair "ok" false)
@@ -104,6 +107,14 @@
    (let $helper (import! &self iter_python.py)
         (py-call (iter_python.invoke $request_file (system:executable)))))
 
+;; The parent requires a complete result file. Publishing failure is also a
+;; process failure; it must not be mistaken for a successful worker invocation.
+(= (worker:publish $path $output)
+   (case (fs:write $path (worker:json $output))
+     ((() ())
+      ($failed (progn (system:write stderr "Iter worker could not write its result\n")
+                       (system:exit 1))))))
+
 !(let* (($request_file (car-atom (system:args)))
         ($request (json:parse (fs:read-text $request_file)))
         ($terminal (json:get $request "terminal"))
@@ -113,4 +124,4 @@
    (if (str:ends-with (json:get $request "module") ".py")
        (worker:python $request_file)
        (let $outcome (collapse (once (worker:serve $request)))
-            (fs:write (json:get $request "result") (worker:json (worker:outcome $outcome))))))
+            (worker:publish (json:get $request "result") (worker:outcome $outcome)))))

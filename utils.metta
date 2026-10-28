@@ -160,8 +160,15 @@
       ((proc:failed $kind $reason)
        (error (str-cat ("cannot start the worker: " $reason)))))))
 
+;; The worker wire preserves numeric representation, including negative zero.
+;; Keep strict JSON's admissibility check, then use the native Python-compatible
+;; writer for its float representation. Neither operation invokes Python.
+(= (worker-wire-json $value)
+   (let $checked (json:stringify $value)
+     (if (is-string $checked) (json:stringify-python $value) $checked)))
+
 (= (run-worker $path $function $args $kwargs $request_file $result_file $timeout)
-   (let $request (json:stringify (JsonObject ((JsonPair "module" $path) (JsonPair "function" $function)
+   (let $request (worker-wire-json (JsonObject ((JsonPair "module" $path) (JsonPair "function" $function)
                                               (JsonPair "args" (JsonArray $args)) (JsonPair "kwargs" $kwargs)
                                               (JsonPair "terminal" (get-state &terminal-runtime))
                                               (JsonPair "terminal_error" (get-state &terminal-error))
