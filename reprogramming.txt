@@ -15,6 +15,7 @@ You can create transformations as .metta files in ./transformations/ (executed i
 (= (description) "What the context transformation does")
 (= (transform $messages $tools) ($messages $tools))
 Messages and tools are CeTTa JSON values: each is a (JsonArray (...)) of objects (JsonObject ((JsonPair "key" value) ...)), whose values are strings, numbers, true, false, JsonNull, objects and arrays. (json:get $object "key") reads a value.
+transformations/append_last_transcript_lines.metta appends the last six lines of ITER_TRANSCRIPT_PATH (default transcript.txt) to the first message; see README.md.
 Example use cases:
 - inspect messages
 - write transcript/checkpoints

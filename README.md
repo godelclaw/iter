@@ -75,6 +75,34 @@ The worker regression accepts `ITER_TEST_REFUSED_URL` for a harness-owned HTTP
 refusal target. `tests/irc_local.py --help` describes the separate isolated IRC
 fixture harness; it uses only numeric loopback TCP/TLS, not a public server.
 
+## Transcript context
+
+`transformations/append_last_transcript_lines.metta` is the native port of
+Iter's `append_last_transcript_lines.py`: it appends `transcript:` and the last
+six lines of the transcript to the first message, right-stripped as Python's
+`str.rstrip` does. It reads `ITER_TRANSCRIPT_PATH`, by default `transcript.txt`
+in the Iter workspace (the Python version's fixed home path is the one
+deliberate difference). `transcript-tail:transform-path $messages $tools $path`
+takes the path directly.
+
+- Messages and tools stay unchanged when there are no messages, the first is
+  not an object, or the file is missing, unreadable, a directory or not
+  well-formed UTF-8. A String `content` (or a missing one) gains
+  `"\n\n" + block`; a parts array gains one text part; other content stays.
+- CR, LF and CRLF end lines, as in Python text files; a final unterminated line
+  counts, a trailing LF adds none. Other Unicode line boundaries do not split.
+- The file is read in chunks through a strict streaming UTF-8 decoder. Only the
+  last six lines and the line being read are kept, so an old prefix costs time
+  but not memory. The whole file is still decoded, so malformed bytes anywhere
+  leave the messages unchanged, as with Python's strict read. The read size
+  (`transcript-tail:chunk-bytes`) is an allocation choice, not a limit.
+- Transcript text is data and is never parsed or evaluated.
+
+`cetta --lang petta tests/transcript_tail.metta < /dev/null` runs the unit and
+descriptor-cleanup checks. `tests/transcript_tail_local.py --help` describes the
+comparison with the Python reference through fresh workers, which needs a copy
+of that reference and optionally measures long prefixes.
+
 ## IRC
 
 `channels/irc.metta` uses native fs/proc/json/str/system/io through `utils.metta`.
