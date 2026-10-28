@@ -261,30 +261,38 @@ def loop_check(harness, path, failures, counts):
         failures.append({"case": "loop/apply_transformation", "got": done.stdout[:300], "want": want[:300]})
 
 
+SHAPES = {"text": "old prefix line with text \u00e9\u20ac 0123456789\n".encode(),
+          "long": b"x" * 3999 + b"\n", "tiny": b"abcdefg\n"}
+
+
 def measure(harness, prefix_mib, repeats):
     directory = harness.files / "measure"
     directory.mkdir()
     suffix = "s1\ns2\r\ns3\nsuffix four \u00e9\n\ns6".encode()
-    line = "old prefix line with text \u00e9\u20ac 0123456789\n".encode()
     messages = VARIANTS["string"]
+    # the reference reads its whole file into memory, so the old prefixes are
+    # not given to it: its answer depends only on the six last lines
+    (directory / "suffix.txt").write_bytes(suffix)
+    want = harness.expected(messages, TOOLS, directory / "suffix.txt")
     rows = []
-    for mib in prefix_mib:
-        path = directory / f"prefix-{mib}.txt"
-        with path.open("wb") as handle:
-            for _ in range(mib * 1024 * 1024 // len(line)):
-                handle.write(line)
-            handle.write(suffix)
-        walls, peaks = [], []
-        want = harness.expected(messages, TOOLS, path)
-        for _ in range(repeats):
-            got, wall, peak = harness.worker("transform", json.dumps([messages, TOOLS]), path)
-            assert got == want, "measured answer differs"
-            walls.append(wall)
-            peaks.append(peak)
-        rows.append({"prefix_mib": mib, "file_bytes": path.stat().st_size, "first_run_s": round(walls[0], 3),
-                     "warm_median_s": round(statistics.median(walls[1:] or walls), 3),
-                     "peak_rss_mib_max": round(max(peaks) / 1024, 1)})
-        path.unlink()
+    for shape, line in SHAPES.items():
+        for mib in prefix_mib:
+            path = directory / f"{shape}-{mib}.txt"
+            block = line * (1024 * 1024 // len(line))
+            with path.open("wb") as handle:
+                for _ in range(mib):
+                    handle.write(block)
+                handle.write(suffix)
+            walls, peaks = [], []
+            for _ in range(repeats):
+                got, wall, peak = harness.worker("transform", json.dumps([messages, TOOLS]), path)
+                assert got == want, "measured answer differs"
+                walls.append(wall)
+                peaks.append(peak)
+            rows.append({"lines": shape, "prefix_mib": mib, "file_bytes": path.stat().st_size,
+                         "first_run_s": round(walls[0], 3), "warm_median_s": round(statistics.median(walls[1:] or walls), 3),
+                         "peak_rss_mib_max": round(max(peaks) / 1024, 1)})
+            path.unlink()
     (harness.evidence / "measurements.json").write_text(json.dumps(rows, indent=2) + "\n")
     return rows
 
