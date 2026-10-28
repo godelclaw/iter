@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--python-tools", action="store_true")
+    parser.add_argument("--history-size", type=int, default=0)
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
@@ -35,8 +36,12 @@ def main():
     (evidence / "sources.json").write_text(json.dumps(identities, indent=2) + "\n")
     if args.python_tools:
         (source / "tools/_python.py").rename(source / "tools/python.py")
+    if args.history_size:
+        (source / "experience.json").write_text(json.dumps([
+            {"role": "user", "content": f"old fixture {number}"}
+            for number in range(args.history_size)]))
     (evidence / "source-adaptations.json").write_text(json.dumps(
-        {"enable_python_tool": args.python_tools}, indent=2) + "\n")
+        {"enable_python_tool": args.python_tools, "seed_history_size": args.history_size}, indent=2) + "\n")
     script = [("send", {"channel": "terminal", "content": "fixture delivered"}),
               ("shell", {"cmd": "printf shell-proof"}),
               ("metta", {"code": "!(+ 1 2)"}),
@@ -129,6 +134,9 @@ def main():
                 assert "SUCCESS, RETURN: nested-proof" in receipts[4]["content"]
             assert receipts[-1]["content"].endswith("SUCCESS")
             assert not (source / "channels/.runtime/irc").exists()
+            if args.history_size >= 100:
+                assert len(experience) <= 100
+                assert not any(m.get("content") == "old fixture 0" for m in experience)
             log.flush()
             output = (evidence / "loop.log").read_text()
             assert "fixture delivered" in output

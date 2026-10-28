@@ -111,13 +111,13 @@
 ;; while True:
 (= (Loop)
    (progn
-     (let $current_bucket (#// (size-atom (get-state &experience)) (cleanup_interval))
+     (let $current_bucket (floor-math (/ (size-atom (get-state &experience)) (cleanup_interval)))
           (if (> $current_bucket (get-state &cleanup_bucket))
               (progn (change-state! &experience (cleanup_old_messages (get-state &experience) 0 (size-atom (get-state &experience))))
                      (change-state! &cleanup_bucket $current_bucket)) _))
      (if (>= (size-atom (get-state &experience)) (MAX_EXPERIENCE_SIZE))
          (progn (change-state! &experience (drop (- (size-atom (get-state &experience)) (RETAIN_EXPERIENCE_SIZE)) (get-state &experience)))
-                (change-state! &cleanup_bucket (#// (size-atom (get-state &experience)) (cleanup_interval)))) _)
+                (change-state! &cleanup_bucket (floor-math (/ (size-atom (get-state &experience)) (cleanup_interval))))) _)
      (change-state! &experience (drop_leading_tool_messages (get-state &experience)))
      (change-state! &history_checkpoint (size-atom (get-state &experience))) ;before user input
      ;; try:
