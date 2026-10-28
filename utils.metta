@@ -43,6 +43,13 @@
 ;; JSON objects as Python's dicts: the keys, a key set in place or appended,
 ;; and keys removed
 (= (object-keys (JsonObject $pairs)) (map-atom $pairs $pair (let (JsonPair $key $value) $pair $key)))
+;; Dictionary lookup uses the last occurrence, like Python's JSON ingestion.
+;; Only absence selects the default; an explicit null is a value.
+(= (object-get $object $key $default)
+   (case (json:get-last $object $key)
+     (((JsonFoundV1 $index $value) $value)
+      (JsonMissingV1 $default)
+      ($other (Error "object-get" "expected a JSON object")))))
 (= (object-put (JsonObject $pairs) $key $value)
    (JsonObject (if (is-member $key (object-keys (JsonObject $pairs)))
                    (map-atom $pairs $pair (let (JsonPair $name $old) $pair (if (== $name $key) (JsonPair $key $value) $pair)))
@@ -270,10 +277,16 @@
      (((ok $metadata) (inop (cons-atom (module-name $path)
                               (cons-atom $path
                                 (cons-atom (limit-description (json:get $metadata "description") $max_description_chars)
-                                  (cons-atom (json:array-items (json:get $metadata "parameters")) ()))))))
+                                  (cons-atom (tool-parameters $metadata) ()))))))
       ((error $error) (failed (str-cat ("[TOOL ERROR in " $path ": RuntimeError: " $error ". Repair " $path " if needed.]")))))))
 
-;; returns ((name path description (parameters)) ...) omitted_tools errors
+(= (tool-parameters $metadata)
+   (let $names (json:array-items (json:get $metadata "parameters"))
+     (case (json:get $metadata "required")
+       (((JsonArray $required) (ToolParameters $names $required))
+        ($legacy $names)))))
+
+;; The fourth field is the old parameter list or (ToolParameters names required).
 (= (load_tools $max_tools $max_description_chars $timeout)
    (let* (($paths (module-files "tools"))
           ($results (map-atom (first-n $max_tools $paths) $path (tool_metadata $path $max_description_chars $timeout))))
@@ -282,12 +295,17 @@
       (str:join "\n" (map-atom (filter-atom $results $result (== (car-atom $result) failed)) $result (index-atom $result 1))))))
 
 (= (native_tool ($name $path $description $parameters))
+   (case $parameters
+     (((ToolParameters $names $required) (native-tool-schema $name $description $names $required))
+      ($legacy (native-tool-schema $name $description $parameters $parameters)))))
+
+(= (native-tool-schema $name $description $parameters $required)
    (JsonObject ((JsonPair "type" "function")
                 (JsonPair "function" (JsonObject ((JsonPair "name" $name)
                                                   (JsonPair "description" $description)
                                                   (JsonPair "parameters" (JsonObject ((JsonPair "type" "object")
                                                                                       (JsonPair "properties" (JsonObject (map-atom $parameters $parameter (JsonPair $parameter (JsonObject ((JsonPair "type" "string")))))))
-                                                                                      (JsonPair "required" (JsonArray $parameters))
+                                                                                      (JsonPair "required" (JsonArray $required))
                                                                                       (JsonPair "additionalProperties" false))))))))))
 
 ;; returns the OpenAI tool schemas as a JSON array

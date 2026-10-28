@@ -10,6 +10,7 @@ You can create tools as .metta files in ./tools/. New tools are available in the
    ;any code
    VALUE)
 A tool fails by answering (Error what "why").
+Optional run arguments use an additional (defaults) function returning a JSON object, for example (= (defaults) (JsonObject ((JsonPair "b" "value")))). List all names in (parameters); the worker fills omitted defaults, keeps an explicitly supplied null, and exposes only the remaining names as required in the tool schema.
 #TRANSFORMATIONS:
 You can create transformations as .metta files in ./transformations/ (executed in alphabetical order) to modify messages and tools before each model call. It must define:
 (= (description) "What the context transformation does")

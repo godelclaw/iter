@@ -26,18 +26,50 @@
           ($declared (eval $call)))
      (if (== $declared $call) () (map-atom $declared $name (text $name)))))
 
-;; run(**kwargs) of Python: the values in the order of (parameters); a
-;; missing or an unexpected name is an error, as it was a TypeError.
+;; An optional (defaults) declaration supplies JSON values for omitted names.
+;; Missing and explicit-null arguments remain distinct.
+(= (worker:defaults $names)
+   (let* (($call (cons-atom defaults ())) ($declared (eval $call)))
+     (if (== $declared $call) (JsonObject ())
+       (case $declared
+         (((JsonObject $pairs)
+           (if (keys-within (object-keys $declared) $names) $declared
+               (worker:failed "TypeError: defaults contains an undeclared parameter")))
+          ($other (worker:failed "TypeError: defaults must return a JSON object")))))))
+
+;; run(**kwargs) of Python: values in parameter order, with explicit defaults.
 (= (worker:run $kwargs)
-   (let* (($names (worker:parameters))
+   (let $names (worker:parameters)
+     (case (worker:defaults $names)
+       (((worker:failed $why) (worker:failed $why))
+        ($defaults (worker:run-with-defaults $kwargs $names $defaults))))))
+
+(= (worker:run-with-defaults $kwargs $names $defaults)
+   (let* (($default-keys (object-keys $defaults))
           ($keys (object-keys $kwargs))
-          ($missing (filter-atom $names $name (not (is-member $name $keys))))
+          ($missing (filter-atom $names $name
+                      (and (not (is-member $name $keys)) (not (is-member $name $default-keys)))))
           ($unexpected (filter-atom $keys $key (not (is-member $key $names)))))
      (if (not (== $missing ()))
          (worker:failed (str-cat ("TypeError: run() missing required arguments: " (str:join ", " $missing))))
          (if (not (== $unexpected ()))
              (worker:failed (str-cat ("TypeError: run() got unexpected keyword arguments: " (str:join ", " $unexpected))))
-             (worker:apply run (map-atom $names $name (json:get $kwargs $name)))))))
+             (worker:apply run (map-atom $names $name
+                                (if (is-member $name $keys) (object-get $kwargs $name JsonNull)
+                                    (object-get $defaults $name JsonNull))))))))
+
+(= (worker:tool-metadata)
+   (let $names (worker:parameters)
+     (case (worker:defaults $names)
+       (((worker:failed $why) (worker:failed $why))
+        ($defaults
+         (case (worker:text (worker:apply description ()))
+           (((worker:failed $why) (worker:failed $why))
+            ($description
+             (JsonObject ((JsonPair "description" $description)
+                          (JsonPair "parameters" (JsonArray $names))
+                          (JsonPair "required" (JsonArray
+                            (filter-atom $names $name (not (is-member $name (object-keys $defaults))))))))))))))))
 
 ;; str(result) of Python for every function but transform; () stands for None,
 ;; and an (Error $what $why) answer fails the call as an exception did.
@@ -57,11 +89,7 @@
 
 (= (worker:call $function $args $kwargs)
    (case $function
-     (("__tool_metadata__"
-       (case (worker:text (worker:apply description ()))
-         (((worker:failed $why) (worker:failed $why))
-          ($description (JsonObject ((JsonPair "description" $description)
-                                     (JsonPair "parameters" (JsonArray (worker:parameters)))))))))
+     (("__tool_metadata__" (worker:tool-metadata))
       ("__description__" (worker:text (worker:apply description ())))
       ("run" (worker:text (worker:run $kwargs)))
       ("transform" (worker:transformed (worker:apply transform $args)))
