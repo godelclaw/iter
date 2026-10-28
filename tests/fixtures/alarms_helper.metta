@@ -3,8 +3,8 @@
 ;; its (Error ...), which the worker reports as a failed call. The worker
 ;; protocol calls any function by name. Paths are relative to the Iter
 ;; workspace, where modules run.
-!(import! &self "transformations/alarms.metta")
+!(import! &self "../../transformations/alarms.metta")
 (= (helper $messages $tools $directory $now $stamp)
    (case (alarms:transform-at $messages $tools $directory $now $stamp)
-     ((($new $kept) (json:stringify (JsonArray ($new $kept))))
+     ((($new $kept) (worker-wire-json (JsonArray ($new $kept))))
       ($failure $failure))))

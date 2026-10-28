@@ -98,6 +98,19 @@
 ;; the public transformation reads ITER_ALARMS_DIR, by default memory/alarms
 !(test (alarms:directory) (system:getenv-or-default "ITER_ALARMS_DIR" "memory/alarms"))
 
+;; Deadline spelling follows float(name); injected integer clocks remain exact.
+!(test (alarms:due "9007199254740993" 9007199254740992) true)
+!(test (alarms:due "9007199254740995" 9007199254740995) false)
+!(test (alarms:due "9007199254740996.0" 9007199254740995) false)
+!(test (alarms:due "9223372036854775807" 9223372036854775807) false)
+!(test (alarms:due "9007199254740993" 9007199254740992.0) true)
+!(test (alarms:due "-9007199254740993" -9007199254740993) false)
+!(test (alarms:due "1.5" 1) false)
+!(test (alarms:due "1.5" 2) true)
+!(test (alarms:valid-time (json:parse-python "NaN")) false)
+!(test (alarms:valid-time (json:parse-python "Infinity")) false)
+!(test (alarms:valid-time (json:parse-python "-Infinity")) false)
+
 ;; every call closes its directory owner, whether it succeeds or fails
 (= (descriptors) (size-atom (fs:entries "/proc/self/fd")))
 (= (repeat $count $directory)

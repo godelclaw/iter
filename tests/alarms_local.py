@@ -16,6 +16,7 @@ import hashlib
 import importlib.util
 import json
 import locale
+import math
 import os
 from pathlib import Path
 import re
@@ -61,14 +62,57 @@ def text(s):
 
 
 def strict_equal(a, b):
-    """Equality that does not take 1 for 1.0 or True for 1."""
+    """Preserve number kinds and the sign of zero, as well as containers."""
     if type(a) is not type(b):
         return False
     if isinstance(a, dict):
         return list(a) == list(b) and all(strict_equal(a[k], b[k]) for k in a)
     if isinstance(a, (list, tuple)):
         return len(a) == len(b) and all(strict_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, float) and a == b == 0:
+        return math.copysign(1, a) == math.copysign(1, b)
     return a == b
+
+
+class ObjectPairs(tuple):
+    """An object occurrence sequence, distinct from a JSON array."""
+
+
+def wire_value(source):
+    return json.loads(source, object_pairs_hook=ObjectPairs)
+
+
+def result_parts(source):
+    """Keep each raw argument of the two-element JSON result for the next call."""
+    decoder = json.JSONDecoder()
+    start = len(source) - len(source.lstrip())
+    assert source[start] == "["
+    start += 1
+    while source[start].isspace():
+        start += 1
+    _, end = decoder.raw_decode(source, start)
+    first = source[start:end]
+    start = end
+    while source[start].isspace():
+        start += 1
+    assert source[start] == ","
+    start += 1
+    while source[start].isspace():
+        start += 1
+    _, end = decoder.raw_decode(source, start)
+    assert source[end:].strip() == "]"
+    return first, source[start:end]
+
+
+def comparator_controls():
+    assert not strict_equal(-0.0, 0.0)
+    assert not strict_equal(1, 1.0)
+    assert not strict_equal(True, 1)
+    assert not strict_equal(wire_value('{"a": 1, "a": 2}'), wire_value('{"a": 2}'))
+    assert not strict_equal(wire_value('{"a": 1}'), wire_value('[["a", 1]]'))
+    left, right = result_parts(' [ [{"a":-0.0,"a":2}], [{"t":3}] ] ')
+    assert strict_equal(wire_value(left), wire_value('[{"a":-0.0,"a":2}]'))
+    assert strict_equal(wire_value(right), wire_value('[{"t":3}]'))
 
 
 class Harness:
@@ -238,9 +282,10 @@ def cases():
     out = []
 
     def add(name, files, now=1000, invocations=None, messages=BASE_MESSAGES, tools=BASE_TOOLS, stamp=STAMP,
-            messages_text=None, group="parity", subdirectory="alarms"):
+            messages_text=None, tools_text=None, group="parity", subdirectory="alarms"):
         out.append(dict(name=name, files=files, invocations=invocations or [(now, stamp)], messages=messages,
-                        tools=tools, messages_text=messages_text, group=group, subdirectory=subdirectory))
+                        tools=tools, messages_text=messages_text, tools_text=tools_text,
+                        group=group, subdirectory=subdirectory))
 
     add("missing-directory", None)
     add("missing-nested-directory", None, subdirectory="a/b/c")
@@ -255,9 +300,11 @@ def cases():
                             "1000.5000000000001": b"future"}, now=1000.5)
     add("float-now-realistic", {"1793164055": b"a\npast", "1793164055.5874524": b"b\nequal", "1793164056": b"c\nfuture"},
         now=1793164055.5874524)
+    add("integer-clock-mixed-boundary", {"9007199254740996.0": b"future"}, now=9007199254740995)
+    add("integer-deadline-rounded", {"9007199254740993": b"due"}, now=9007199254740992)
     add("admitted-spellings", {n: text("c%d\nspelling %s" % (i, n)) for i, n in enumerate(
         ["+5", "5.", ".5", "-.5", "1e2", "1E2", "1e+2", "1.5e1", "005", "-0", "0", "0.0", "00.5e0", "1e-3", "-3",
-         "3.14159", "+0", "-0.0", "1e0", "1e+0", "+.5e1", "9.9e1", "0.1e3"])}, now=100)
+         "3.14159", "+0", "-0.0", "1e0", "1e+0", "+.5e1", "9.9e1", "0.1e3", "1.e2", "1e-400"])}, now=100)
     add("hidden-name-is-numeric", {".5": b"hidden", "5": b"plain"}, now=100)
     add("inf-nan-overflow-never-due", {n: b"x" for n in ["inf", "+inf", "infinity", "Infinity", "nan", "-nan", "1e400", "+1e400"]},
         now=10 ** 12)
@@ -301,8 +348,9 @@ def cases():
                                                      123456789.123456789, 2 ** 100, -(2 ** 100), 10 ** 30]}},
                   [1, 2], "string", None, 7, True, {"role": "assistant", "tool_calls": []}] * 2,
         tools=[None, [], {}, "t", 1.5, {"a": {"b": {"c": [None]}}}])
-    # the engine's json:stringify writes -0.0 as 0.0 (json:parse keeps the sign): a spelling difference, kept apart
-    add("negative-zero-passthrough", {"1": b"a\nb"}, messages=[{"role": "user", "content": "z", "n": [-0.0, -0.5e-300]}], group="spelling")
+    add("negative-zero-passthrough", {"1": b"a\nb"}, messages=[{"role": "user", "content": "z", "n": [-0.0, -0.5e-300]}],
+        tools=[{"zero": -0.0, "integer": 0, "float": 0.0}])
+    add("duplicate-tool-keys", {"1": b"a\nb"}, tools_text='[{"dup": 1, "dup": 2, "n": -0.0}]')
     add("duplicate-object-keys", {"1": b"a\nb"},
         messages_text='[{"role": "user", "content": "x", "k": 1}, {"content": "first", "k": 1, "content": "second"}]',
         group="duplicate-keys")
@@ -354,28 +402,37 @@ def run_case(harness, case, failures, log):
                 os.chmod(target, 0o555)
     directories = [root / case["subdirectory"] for root in roots]
     messages_text = case["messages_text"] or json.dumps(case["messages"])
-    tools_text = json.dumps(case["tools"])
+    tools_text = case["tools_text"] or json.dumps(case["tools"])
+    expected_messages, expected_tools = json.loads(messages_text), json.loads(tools_text)
     problems = []
     for index, (now, stamp) in enumerate(case["invocations"]):
-        want = harness.expected(json.loads(messages_text), case["tools"], directories[0], now, stamp)
+        want = harness.expected(expected_messages, expected_tools, directories[0], now, stamp)
         got, wall, rss = harness.native(messages_text, tools_text, directories[1], now, stamp)
         label = f"{case['name']}#{index}"
+        left, right = snapshot(roots[0]), snapshot(roots[1])
+        if left != right:
+            problems.append({"case": label, "remaining_files": describe_difference(left, right)})
         if want[0] != got[0]:
             problems.append({"case": label, "reference": want[0], "native": got[0],
                              "detail": str(want[1])[:200] if want[0] == "error" else got[1][:300]})
             break
         if want[0] == "error":
             log["error_pairs"].append({"case": label, "python": want[1], "native": got[1][:240]})
+            if not got[1].startswith("alarms:"):
+                problems.append({"case": label, "error_scope": got[1]})
             continue
         if not strict_equal(got[1], want[1]):
             problems.append({"case": label, "value": "differs", "got": dumps(got[1])[:300], "want": dumps(want[1])[:300]})
-        elif dumps(got[1]) != dumps(want[1]):
-            log["spelling_differences"].append({"case": label, "group": case["group"], "got": dumps(got[1])[:300], "want": dumps(want[1])[:300]})
-        if case["group"] == "duplicate-keys":
-            # stronger declared check: unrelated duplicate occurrences pass through unchanged
-            wire = json.loads(got[2], object_pairs_hook=tuple)
-            if wire[0][1] != (("content", "first"), ("k", 1), ("content", "second")):
-                problems.append({"case": label + "/native-occurrences", "wire": str(wire[0][1])[:200]})
+        # The reference appends new messages but never rewrites the existing
+        # messages or tools. Preserve their raw object occurrence sequences,
+        # which a normal dict comparison would silently collapse.
+        expected_wire = [wire_value(messages_text) +
+                         wire_value(dumps(want[1][0][len(expected_messages):])),
+                         wire_value(tools_text)]
+        if not strict_equal(wire_value(got[2]), expected_wire):
+            problems.append({"case": label, "wire_values": "number kind/sign, order or field occurrences differ"})
+        expected_messages, expected_tools = want[1]
+        messages_text, tools_text = result_parts(got[2])
     left, right = snapshot(roots[0]), snapshot(roots[1])
     if left != right:
         problems.append({"case": case["name"], "remaining_files": describe_difference(left, right)})
@@ -446,11 +503,18 @@ def listing_refusal(harness, log, failures):
     log["listing_refusal"] = rows
 
 
-def large_integer_rounding(harness, log):
-    """Integer names above 2**53: Python rounds to a double; record what the native does. Not a pass criterion."""
+def large_integer_rounding(harness, log, failures):
+    """Both clock representations and deadline spellings must match the oracle."""
     rows = []
-    for name, now in [("9007199254740993", 9007199254740992.0), ("9007199254740993", 9007199254740994.0),
-                      ("9007199254740992", 9007199254740992.0), ("18014398509481985", 18014398509481984.0)]:
+    boundaries = []
+    for power in (52, 53, 54, 63, 64):
+        for sign in (1, -1):
+            for offset in (-1, 1, 3):
+                clock = sign * (2 ** power + offset)
+                for now in (clock, float(clock)):
+                    boundaries.append((str(clock), now))
+                    boundaries.append((str(float(clock + 1)), now))
+    for name, now in boundaries:
         base = harness.cases / f"round-{len(rows)}"
         roots = [base / "ref" / "alarms", base / "native" / "alarms"]
         for root in roots:
@@ -458,8 +522,14 @@ def large_integer_rounding(harness, log):
             materialize({name: b"a\nb"}, root)
         want = harness.expected(BASE_MESSAGES, BASE_TOOLS, roots[0], now, STAMP)
         got, _, _ = harness.native(json.dumps(BASE_MESSAGES), json.dumps(BASE_TOOLS), roots[1], now, STAMP)
-        rows.append({"name": name, "now": now, "python_due": len(want[1][0]) > len(BASE_MESSAGES),
-                     "native_due": len(got[1][0]) > len(BASE_MESSAGES)})
+        ok = (want[0] == got[0] == "ok" and strict_equal(want[1], got[1])
+              and snapshot(roots[0]) == snapshot(roots[1]))
+        row = {"name": name, "now": now, "clock_kind": type(now).__name__, "ok": ok,
+               "python_due": len(want[1][0]) > len(BASE_MESSAGES) if want[0] == "ok" else None,
+               "native_due": len(got[1][0]) > len(BASE_MESSAGES) if got[0] == "ok" else None}
+        rows.append(row)
+        if not ok:
+            failures.append({"case": "deadline-boundary", **row})
     log["large_integer_rounding"] = rows
 
 
@@ -474,21 +544,19 @@ def public_transform(harness, failures, log):
     time.tzset()
     files = {"0": b"first\nnow past", "1": b"second", "100": b"third\nfine", "99999999999": b"future\nstays", "text": b"x"}
     results = []
-    plans = (("default-directory", harness.work / "memory" / "alarms", {}, files),
-             ("default-directory-absent", harness.work / "other" / "memory" / "alarms", None, {}),
+    plans = (("default-directory-absent", harness.work / "memory" / "alarms", {}, None),
+             ("default-directory", harness.work / "memory" / "alarms", {}, files),
              ("ITER_ALARMS_DIR", harness.evidence / "custom-alarms", {"ITER_ALARMS_DIR": str(harness.evidence / "custom-alarms")}, files),
-             ("ITER_ALARMS_DIR-relative", harness.work / "rel" / "dir", {"ITER_ALARMS_DIR": "rel/dir"}, files))
+             ("ITER_ALARMS_DIR-relative", harness.work / "rel" / "dir", {"ITER_ALARMS_DIR": "rel/dir/"}, files))
     for label, directory, env, spec in plans:
         reference_dir = harness.evidence / f"public-ref-{label}"
         reference_dir.mkdir()
-        materialize(spec, reference_dir)
-        if env is None:
-            # a different workspace has no memory/alarms: the transformation makes it
-            alarm_dir = harness.work / "memory" / "alarms-absent"
-            env, directory = {"ITER_ALARMS_DIR": str(alarm_dir)}, alarm_dir
-            shutil.rmtree(alarm_dir, ignore_errors=True)
+        materialize(spec or {}, reference_dir)
+        if spec is None:
+            assert not (harness.work / "memory").exists()
+            assert "ITER_ALARMS_DIR" not in harness.environment(env)
         else:
-            directory.mkdir(parents=True)
+            directory.mkdir(parents=True, exist_ok=True)
             materialize(spec, directory)
         before = int(time.time())
         answer, wall, rss = harness.worker("transform", json.dumps([BASE_MESSAGES, BASE_TOOLS]), module=MODULE, env=env)
@@ -504,7 +572,7 @@ def public_transform(harness, failures, log):
                 message["content"] = STAMP_RE.sub("Step @@: ", message["content"], count=1)
             ok = strict_equal(normalized, want[1]) and all(s in window for s in stamps)
         left, right = snapshot(reference_dir), snapshot(directory)
-        ok = ok and left == right
+        ok = ok and left == right and directory.is_dir()
         results.append({"case": label, "ok": ok, "stamps": stamps, "zone": ZONE, "latency_s": round(wall, 3)})
         if not ok:
             failures.append({"case": "public/" + label, "answer": str(answer)[:400]})
@@ -535,6 +603,26 @@ def loop_check(harness, failures, log):
     log["loop"] = {"ok": ok, "stdout": done.stdout[:300]}
     if not ok:
         failures.append({"case": "loop/apply_transformation", "stdout": done.stdout[:300], "stderr": done.stderr[:300]})
+    # Exercise both parent request serialization and child result serialization.
+    # A helper-only run would not notice the parent erasing signed zero first.
+    messages = '[{"n": -0.0, "n": 1.0, "raw": [0, -0.0]}]'
+    tools = '[{"x": -0.0, "x": 2}]'
+    program.write_text('!(import! &self utils)\n'
+        f'!(let (ok $wire) (invoke_dynamic "{HELPER}" "helper" '
+        f'((json:parse {json.dumps(messages)}) (json:parse {json.dumps(tools)}) '
+        f'{json.dumps(str(directory))} 10 "S") (no-kwargs) 20) (system:write stdout $wire))\n')
+    done = subprocess.run(harness.command(["--no-results", str(program)]), cwd=harness.work,
+                          env=harness.environment(), stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=30)
+    try:
+        same = strict_equal(wire_value(done.stdout), [wire_value(messages), wire_value(tools)])
+    except (ValueError, TypeError):
+        same = False
+    ok = done.returncode == 0 and not done.stderr and same
+    log["parent_worker_wire"] = {"ok": ok, "returncode": done.returncode,
+                                 "stdout": done.stdout, "stderr": done.stderr}
+    if not ok:
+        failures.append({"case": "loop/parent-worker-wire", "stdout": done.stdout, "stderr": done.stderr})
 
 
 # -------------------------------------------- durability and interruption
@@ -555,6 +643,8 @@ def witnesses(harness, log):
     got, _, _ = harness.native(json.dumps(BASE_MESSAGES), json.dumps(BASE_TOOLS), directory, 10, STAMP)
     rows["failure-after-removal"] = {"answer": got[0], "error": got[1][:200], "files_after": sorted(p.name for p in directory.iterdir()),
                                      "alarm_message_delivered": False}
+    assert got[0] == "error" and got[1].startswith("alarms:")
+    assert rows["failure-after-removal"]["files_after"] == ["2"]
     directory = harness.evidence / "witness-result" / "alarms"
     directory.mkdir(parents=True)
     materialize({"1": b"a\nconsumed, result unwritable"}, directory)
@@ -564,6 +654,8 @@ def witnesses(harness, log):
     stdout, stderr = process.communicate(timeout=harness.worker_timeout)
     rows["result-not-accepted"] = {"launcher_output": stdout[:120], "result_file_exists": lost.exists(),
                                    "files_after": sorted(p.name for p in directory.iterdir())}
+    assert json.loads(stdout)["status"] == 256, "result publication failure must exit 1"
+    assert not lost.exists() and rows["result-not-accepted"]["files_after"] == []
     attempts = []
     for count in (4000, 12000, 30000):
         directory = harness.evidence / f"witness-kill-{count}" / "alarms"
@@ -580,15 +672,21 @@ def witnesses(harness, log):
                 killed = True
                 break
             time.sleep(0.002)
-        process.communicate()
+        timed_out = process.poll() is None and not killed
+        if timed_out:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=5)
         names = os.listdir(directory)
         whole = all((directory / n).read_bytes() == text("c\nbody %s" % n) for n in names)
         leftover = [p for p in os.listdir("/proc") if p.isdigit() and _pgrp(int(p)) == process.pid]
-        attempts.append({"alarms": count, "killed_while_running": killed, "remaining": len(names), "removed": count - len(names),
+        attempts.append({"alarms": count, "killed_while_running": killed, "timed_out": timed_out,
+                         "remaining": len(names), "removed": count - len(names),
                          "result_file_exists": result.exists(), "remaining_files_whole_and_unchanged": whole,
                          "processes_left_in_group": leftover})
         if killed:
             break
+    assert any(row["killed_while_running"] and row["removed"] > 0 and not row["result_file_exists"] for row in attempts)
+    assert all(row["remaining_files_whole_and_unchanged"] and not row["processes_left_in_group"] for row in attempts)
     rows["sigkill-during-handling"] = attempts
     log["delivery_witnesses"] = rows
 
@@ -597,7 +695,7 @@ def witnesses(harness, log):
 
 def metta_suites(harness, log, failures):
     rows = []
-    for suite in ("tests/alarms.metta", "tests/text_helper.metta"):
+    for suite in ("tests/alarms.metta", "tests/text_helper.metta", "tests/worker_wire.metta"):
         for name in (suite, "tests/fixtures/transcript/malformed.bin", "transformations/append_last_transcript_lines.metta"):
             (harness.work / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(harness.root / name, harness.work / name)
@@ -625,6 +723,8 @@ MUTATIONS = {
     "no-directory-creation": ("(case (fs:make-directories $directory (alarms:mode))", "(case (let $skipped $directory ())"),
     "arbitrary-limit": ("(alarms:handle-all (alarms:sort $names)", "(alarms:handle-all (list:take 100 (alarms:sort $names))"),
     "split-at-blank-line": ("(str:find $content \"\\n\")", "(str:find $content \"\\n\\n\")"),
+    "rounded-integer-clock": ("(> $now-floor $target-floor)", "(>= $now $target)"),
+    "exact-integer-deadline": ("(alarms:at-or-after $now (* 1.0 $target))", "(alarms:at-or-after $now $target)"),
 }
 
 
@@ -642,6 +742,17 @@ def negative_controls(args, root, log):
                 break
         rows.append({"mutation": name, "detected": detected is not None, "first_failing_case": detected,
                      "failure": failures[0] if failures else None})
+    harness = Harness(args, evidence=args.evidence.absolute() / "negative-signed-zero-wire")
+    path = harness.work / "utils.metta"
+    source = path.read_text()
+    assert source.count("(json:stringify-python $value)") == 1
+    path.write_text(source.replace("(json:stringify-python $value)", "(json:stringify $value)"))
+    failures, scratch = [], {"cases": [], "spelling_differences": [], "error_pairs": []}
+    case = next(case for case in cases() if case["name"] == "negative-zero-passthrough")
+    detected = not run_case(harness, case, failures, scratch)
+    rows.append({"mutation": "signed-zero-wire", "detected": detected,
+                 "first_failing_case": case["name"] if detected else None,
+                 "failure": failures[0] if failures else None})
     log["negative_controls"] = rows
     return rows
 
@@ -717,6 +828,7 @@ def main():
         "the reference reads text in the locale encoding: run with PYTHONUTF8=1"
     os.environ["TZ"] = ZONE
     time.tzset()
+    comparator_controls()
     harness = Harness(args)
     failures = []
     log = {"cases": [], "spelling_differences": [], "error_pairs": [], "python_float_spelling_differences": [],
@@ -725,7 +837,7 @@ def main():
         run_case(harness, case, failures, log)
     differences(harness, log, failures)
     listing_refusal(harness, log, failures)
-    large_integer_rounding(harness, log)
+    large_integer_rounding(harness, log, failures)
     public_transform(harness, failures, log)
     loop_check(harness, failures, log)
     metta_suites(harness, log, failures)

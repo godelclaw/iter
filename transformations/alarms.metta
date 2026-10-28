@@ -21,7 +21,7 @@
 !(import! &self (library fs))
 !(import! &self (library list))
 !(import! &self (library system))
-!(import! &self lib_text)
+!(import! &self "../lib_text.metta")
 
 (= (description) "Alarm clock handling")
 
@@ -54,11 +54,13 @@
                  ((() (alarms:transform-in $items $messages $tools $directory $when $stamp))
                   ($failed (alarms:fault "cannot make the alarm directory" $failed))))
                (alarms:failure "the timestamp must be a string"))
-           (alarms:failure "the time must be a number")))
+           (alarms:failure "the time must be a finite number")))
       ($other (alarms:failure "messages must be a JSON array")))))
 
 (= (alarms:valid-time $when)
-   (or (== $when (alarms:clock)) (== (get-type $when) Number)))
+   (or (== $when (alarms:clock))
+       (and (== (get-type $when) Number)
+            (== (get-type (json:stringify $when)) String))))
 (= (alarms:valid-stamp $stamp)
    (or (== $stamp (alarms:clock)) (== (get-type $stamp) String)))
 
@@ -159,7 +161,19 @@
 (= (alarms:due $name $now)
    (case (str:string->number $name)
      (((Error $call $why) False)
-      ($target (>= $now $target)))))
+      ($target (alarms:at-or-after $now (* 1.0 $target))))))
+
+;; The reference parses deadlines as binary64, including integer spellings.
+;; Injected clocks may be exact integers. Compare their integer floors first
+;; so a mixed comparison cannot round an integer clock up to a future deadline.
+;; Within the same unit interval, fractional binary64 comparisons are exact
+;; for this purpose; above 2^53 the represented floats have no fractional part.
+(= (alarms:at-or-after $now $target)
+   (let* (($now-floor (floor-math $now))
+          ($target-floor (floor-math $target)))
+     (if (== $now-floor $target-floor)
+         (>= $now $target)
+         (> $now-floor $target-floor))))
 
 ;; (AlarmsHandledV1 reversed-messages) after reading, removing and appending
 ;; each alarm in turn, or the failure of the first that fails.
