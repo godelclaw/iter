@@ -92,8 +92,9 @@ takes the path directly.
 - CR, LF and CRLF end lines, as in Python text files; a final unterminated line
   counts, a trailing LF adds none. Other Unicode line boundaries do not split.
 - The file is read in chunks through a strict streaming UTF-8 decoder. Only the
-  last six lines and the line being read are kept, so an old prefix costs time
-  but not memory. The whole file is still decoded, so malformed bytes anywhere
+  last six lines and the line being read are kept; discarded lines do not
+  accumulate. A very long current line can still be large. The whole file is
+  decoded, so malformed bytes anywhere
   leave the messages unchanged, as with Python's strict read. The read size
   (`transcript-tail:chunk-bytes`) is an allocation choice, not a limit.
 - Transcript text is data and is never parsed or evaluated.

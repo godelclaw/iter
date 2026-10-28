@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -47,6 +48,7 @@ class Harness:
     def __init__(self, args):
         self.binary = args.binary.resolve(strict=True)
         self.limit = args.address_space_kib
+        self.worker_timeout = args.worker_timeout
         self.root = Path(__file__).resolve().parents[1]
         self.evidence = args.evidence.absolute()
         self.evidence.mkdir(parents=True, exist_ok=False)
@@ -77,9 +79,19 @@ class Harness:
         command = [str(self.binary), "--lang", "petta", "--no-results", "iter_worker.metta", str(request)]
         if self.limit:
             command = ["bash", "-c", f"ulimit -v {self.limit}; exec \"$@\"", "worker"] + command
-        done = subprocess.run([sys.executable, "-S", "-c", LAUNCHER, json.dumps(["nice", "-n", "19"] + command),
-                               str(self.work), json.dumps(env)], capture_output=True, text=True, check=True)
-        usage = json.loads(done.stdout)
+        launch = [sys.executable, "-S", "-c", LAUNCHER,
+                  json.dumps(["nice", "-n", "19"] + command), str(self.work), json.dumps(env)]
+        process = subprocess.Popen(launch, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=self.worker_timeout)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, launch, stdout, stderr)
+        usage = json.loads(stdout)
         self.runs += 1
         assert usage["status"] == 0, f"worker status {usage['status']}"
         answer = json.loads(result.read_text())
@@ -180,6 +192,7 @@ VARIANTS = {
     "string-long-space": system("a" + " \u3000\n" * 300000),
     "string-empty": system(""), "string-blank": system(" \n\t\u3000"),
     "string-expression": system(EXPRESSION + " \n"), "string-nul-unicode": system("a\x00\u00e9\u20ac\U0001f600 "),
+    "large-integers": [{"content": "s", "large": 2**100, "negative": -(2**100)}],
     "parts": system([{"type": "text", "text": "keep \n"}, {"type": "image", "url": "u"}]),
     "parts-empty": system([]), "null": system(None), "number": system(7), "float": system(2.5),
     "true": system(True), "false": system(False), "object": system({"type": "text"}),
@@ -232,9 +245,25 @@ def qualify(harness):
     # duplicate keys in the request text: json.loads keeps the last value at the first place
     path = directory / "mixed-newlines"
     check("duplicate-keys", "transform", DUPLICATE_KEYS, [], [], path, path)
+    # The native protocol also preserves unrelated duplicate occurrences.
+    wire = dict(json.loads((harness.work / "result.json").read_text(), object_pairs_hook=tuple))
+    content = harness.expected(json.loads(DUPLICATE_KEYS), [], path)[0][0]["content"]
+    if wire["result"][0][0] != (("role", "system"), ("content", content), ("k", 1), ("k", 2)):
+        failures.append({"case": "duplicate-keys/native-occurrences"})
+    description, _, _ = harness.worker("__description__", "[]")
+    counts["compared"] += 1
+    if description != harness.reference.DESCRIPTION:
+        failures.append({"case": "description", "got": description, "want": harness.reference.DESCRIPTION})
+    default_path = harness.work / "transcript.txt"
+    default_path.write_bytes(path.read_bytes())
+    default_before = identity(default_path)
+    check("default-path", "transform", json.dumps(VARIANTS["string"]), TOOLS, [], None, default_path)
+    check("empty-environment-path", "transform", json.dumps(VARIANTS["string"]), TOOLS, [], "", "")
     loop_check(harness, directory / "mixed-newlines", failures, counts)
     after = {name: identity(directory / name) for name in before}
     modified = [name for name in before if before[name] != after[name]]
+    if identity(default_path) != default_before:
+        modified.append("workspace/transcript.txt")
     summary = {"fixtures": len(names), "comparisons": counts["compared"], "answers_changed": counts["changed"],
                "worker_runs": harness.runs, "unreadable_enforced": not os.access(directory / "unreadable", os.R_OK),
                "input_files_modified": modified, "failures": failures}
@@ -303,9 +332,13 @@ def main():
     parser.add_argument("--oracle", type=Path, required=True, help="a copy of the reference transformation")
     parser.add_argument("--evidence", type=Path, required=True, help="a new directory")
     parser.add_argument("--address-space-kib", type=int, default=0, help="optional ulimit -v for each worker")
+    parser.add_argument("--worker-timeout", type=float, default=60,
+                        help="seconds before a test worker and its process group are stopped")
     parser.add_argument("--measure", type=int, nargs="*", metavar="PREFIX_MIB", help="also measure these old-prefix sizes")
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args()
+    if args.worker_timeout <= 0:
+        parser.error("--worker-timeout must be positive")
     harness = Harness(args)
     summary = qualify(harness)
     print(json.dumps({key: value for key, value in summary.items() if key != "failures"}, indent=2))
