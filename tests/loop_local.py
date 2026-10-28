@@ -24,6 +24,8 @@ def main():
                         help="seed due and future alarms and check the complete model turn")
     parser.add_argument("--enable-thinking", choices=("true", "false"),
                         help="exercise the explicit provider extension")
+    parser.add_argument("--reminder", action="store_true",
+                        help="schedule a reminder and observe it on the next model turn")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     root = Path(__file__).resolve().parents[1]
@@ -62,11 +64,14 @@ def main():
     (evidence / "source-adaptations.json").write_text(json.dumps(
         {"enable_python_tool": args.python_tools, "seed_history_size": args.history_size,
          "seed_alarms": args.alarms,
+         "schedule_reminder": args.reminder,
          "transcript_sha256": transcript_identity}, indent=2) + "\n")
     script = [("send", {"channel": "terminal", "content": "fixture delivered"}),
               ("shell", {"cmd": "printf shell-proof"}),
               ("metta", {"code": "!(+ 1 2)"}),
               ("missing-tool", {})]
+    if args.reminder:
+        script.insert(0, ("reminder", {"when": "1970-01-01 00:00:00", "message": "fixture scheduled"}))
     if args.python_tools:
         script.append(("python", {"code": "print(send('terminal', 'nested delivered')); print(shell('printf nested-proof'))"}))
     script.append(("nop", {}))
@@ -156,6 +161,11 @@ def main():
                 assert sum(map(len, alarm_messages)) == 1, alarm_messages
                 assert not (alarms / "0").exists()
                 assert (alarms / "99999999999").read_text() == "terminal\nfuture alarm"
+            if args.reminder:
+                observed = [m for request in requests for m in request["body"]["messages"]
+                            if isinstance(m.get("content"), str) and "[ALARM] fixture scheduled" in m["content"]]
+                assert len(observed) == 1, observed
+                assert "[terminal]" in observed[0]["content"]
             if transcript is not None:
                 for request in requests:
                     first = request["body"]["messages"][0]
@@ -167,12 +177,15 @@ def main():
             receipts = [m for m in experience if m["role"] == "tool"]
             assert len(receipts) == len(script)
             assert len({m["tool_call_id"] for m in receipts}) == len(script)
-            assert receipts[0]["content"].endswith("SUCCESS")
-            assert receipts[1]["content"].endswith("SUCCESS, RETURN: shell-proof")
-            assert receipts[2]["content"].endswith("true\ntrue\n3\n")
-            assert receipts[3]["content"].endswith("Unknown tool: missing-tool")
+            offset = int(args.reminder)
+            if args.reminder:
+                assert "SUCCESS, RETURN: Reminder set for 1970-01-01 00:00:00" in receipts[0]["content"]
+            assert receipts[offset]["content"].endswith("SUCCESS")
+            assert receipts[offset + 1]["content"].endswith("SUCCESS, RETURN: shell-proof")
+            assert receipts[offset + 2]["content"].endswith("true\ntrue\n3\n")
+            assert receipts[offset + 3]["content"].endswith("Unknown tool: missing-tool")
             if args.python_tools:
-                assert "SUCCESS, RETURN: nested-proof" in receipts[4]["content"]
+                assert "SUCCESS, RETURN: nested-proof" in receipts[offset + 4]["content"]
             assert receipts[-1]["content"].endswith("SUCCESS")
             assert not (source / "channels/.runtime/irc").exists()
             if args.history_size >= 100:

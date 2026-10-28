@@ -139,6 +139,14 @@ of that reference and optionally measures long prefixes.
 
 ## Alarms
 
+`tools/reminder.metta` creates an alarm from a local `YYYY-MM-DD HH:MM:SS`
+date. Its optional `channel` defaults to `terminal` and `message` to empty
+text. It shares `ITER_ALARMS_DIR` with the transformation. Local clock changes
+follow the reference's default fold selection; the calendar helper is MeTTa
+over native timezone observations. Creating another reminder with the same
+timestamp replaces that file, as the original tool does. A successful write
+does not guarantee later delivery or persistence across a crash.
+
 `transformations/alarms.metta` is the native port of Iter's `alarms.py`: each
 file in the alarm directory whose name is a decimal epoch time that has come
 becomes a user message `Step STAMP: [CHANNEL] [ALARM] MESSAGE`, and the file is
@@ -190,6 +198,11 @@ Python reference through fresh workers, the negative controls and the
 measurements.
 `tests/loop_local.py --alarms` checks due-alarm context and future-alarm
 preservation in complete local model/tool turns, including a model retry.
+Add `--reminder` to exercise scheduling through the tool and receipt of the
+alarm in the next model context. `tests/reminder_local.py` compares output
+and files with the pinned Python source across five timezones, including
+ambiguous, skipped and invalid dates. `tests/calendar_negative.py` checks
+deliberately broken timezone, fold, gap and calendar variants.
 
 ## IRC
 

@@ -122,7 +122,7 @@
        (("tests/fixtures/texts/notes.txt" "goal: learn") ("tests/fixtures/texts/sub/deep.txt" "deep fact") ("tests/fixtures/texts/sub-b.txt" "a-b")))
 
 ;; modules
-!(test (module-files "tools") ("tools/metta.metta" "tools/nop.metta" "tools/send.metta" "tools/shell.metta"))
+!(test (module-files "tools") ("tools/metta.metta" "tools/nop.metta" "tools/reminder.metta" "tools/send.metta" "tools/shell.metta"))
 !(test (module-name "channels/_example.metta") "_example")
 !(test (module-files "tests/fixtures/modules") ("tests/fixtures/modules/guest.py" "tests/fixtures/modules/native.metta"))
 !(test (run-tool (index-atom (module-files "tests/fixtures/modules") 1) (no-kwargs)) (ok "native twin"))
