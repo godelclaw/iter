@@ -17,12 +17,30 @@ from pathlib import Path
 import shutil
 import statistics
 import subprocess
-import time
+import sys
 
 MODULE = "transformations/append_last_transcript_lines.metta"
 HELPER = "tests/fixtures/transcript_helper.metta"
 CHUNK = 65536
 WORKSPACE_FILES = ["utils.metta", "iter_worker.metta", "iter_llm.metta", "iter_python.py", MODULE, HELPER]
+
+
+# A small process forks the worker and reports its own wait4 usage. Forking from
+# this large harness would charge the harness's memory to the worker's peak.
+LAUNCHER = """
+import json, os, sys, time
+command, directory, env = json.loads(sys.argv[1]), sys.argv[2], json.loads(sys.argv[3])
+start = time.monotonic()
+pid = os.fork()
+if pid == 0:
+    os.chdir(directory)
+    null = os.open(os.devnull, os.O_RDWR)
+    for descriptor in (0, 1, 2):
+        os.dup2(null, descriptor)
+    os.execvpe(command[0], command, env)
+_, status, usage = os.wait4(pid, 0)
+print(json.dumps({"status": status, "wall": time.monotonic() - start, "maxrss": usage.ru_maxrss}))
+"""
 
 
 class Harness:
@@ -59,17 +77,15 @@ class Harness:
         command = [str(self.binary), "--lang", "petta", "--no-results", "iter_worker.metta", str(request)]
         if self.limit:
             command = ["bash", "-c", f"ulimit -v {self.limit}; exec \"$@\"", "worker"] + command
-        start = time.monotonic()
-        process = subprocess.Popen(["nice", "-n", "19"] + command, cwd=self.work, env=env,
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        _, status, usage = os.wait4(process.pid, 0)
-        wall = time.monotonic() - start
+        done = subprocess.run([sys.executable, "-S", "-c", LAUNCHER, json.dumps(["nice", "-n", "19"] + command),
+                               str(self.work), json.dumps(env)], capture_output=True, text=True, check=True)
+        usage = json.loads(done.stdout)
         self.runs += 1
-        assert status == 0, f"worker status {status}"
+        assert usage["status"] == 0, f"worker status {usage['status']}"
         answer = json.loads(result.read_text())
         assert answer["ok"] is True, answer
         value = answer["result"]
-        return (json.loads(value) if module == HELPER else value), wall, usage.ru_maxrss
+        return (json.loads(value) if module == HELPER else value), usage["wall"], usage["maxrss"]
 
     def expected(self, messages, tools, path):
         self.reference.TRANSCRIPT_PATH = str(path)
@@ -258,9 +274,10 @@ def measure(harness, prefix_mib, repeats):
                 handle.write(line)
             handle.write(suffix)
         walls, peaks = [], []
+        want = harness.expected(messages, TOOLS, path)
         for _ in range(repeats):
             got, wall, peak = harness.worker("transform", json.dumps([messages, TOOLS]), path)
-            assert got == harness.expected(messages, TOOLS, path), "measured answer differs"
+            assert got == want, "measured answer differs"
             walls.append(wall)
             peaks.append(peak)
         rows.append({"prefix_mib": mib, "file_bytes": path.stat().st_size, "first_run_s": round(walls[0], 3),
