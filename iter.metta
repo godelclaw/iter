@@ -105,7 +105,8 @@
               (change-state! &autonomous_steps 0)
               (change-state! &new_burst true)
               (change-state! &pending_event_append "")
-              (change-state! &cleanup_bucket (floor-math (/ (size-atom (get-state &experience)) (cleanup_interval))))
+              ;; cleanup_bucket = -1 (runs cleanup_old_messages once on restart; upstream uses len(experience) // cleanup_interval)
+              (change-state! &cleanup_bucket -1)
               (Loop))))))
 
 ;; while True:

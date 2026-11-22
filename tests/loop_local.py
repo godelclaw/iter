@@ -17,7 +17,8 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--python-tools", action="store_true")
-    parser.add_argument("--history-size", type=int, default=0)
+    parser.add_argument("--history-size", type=int, default=0,
+                        help="seed N earlier messages; 16 or more also checks the startup cleanup, 100 or more the trim")
     parser.add_argument("--transcript", type=Path,
                         help="valid UTF-8 fixture copied into the loop workspace")
     parser.add_argument("--alarms", action="store_true",
@@ -45,9 +46,16 @@ def main():
     if args.python_tools:
         (source / "tools/_python.py").rename(source / "tools/python.py")
     if args.history_size:
-        (source / "experience.json").write_text(json.dumps([
-            {"role": "user", "content": f"old fixture {number}"}
-            for number in range(args.history_size)]))
+        history = [{"role": "user", "content": f"old fixture {number}"}
+                   for number in range(args.history_size)]
+        if args.history_size >= 16:
+            for offset, call_id, body_text in ((15, "seed-old-tool", "O" * 400),
+                                               (5, "seed-recent-tool", "R" * 400)):
+                pos = args.history_size - offset
+                history[pos - 1] = {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": call_id, "type": "function", "function": {"name": "shell", "arguments": "{}"}}]}
+                history[pos] = {"role": "tool", "tool_call_id": call_id, "content": body_text}
+        (source / "experience.json").write_text(json.dumps(history))
     if args.alarms:
         alarms = source / "memory/alarms"
         alarms.mkdir(parents=True)
@@ -188,7 +196,9 @@ def main():
             assert not any("[RUNTIME ERROR in " in str(message.get("content", ""))
                            for request in requests for message in request["body"]["messages"])
             assert any("hello fixture" in str(m.get("content", "")) for m in experience if m["role"] == "user")
-            receipts = [m for m in experience if m["role"] == "tool"]
+            seeded_tool_ids = {"seed-old-tool", "seed-recent-tool"} if args.history_size >= 16 else set()
+            receipts = [m for m in experience
+                        if m["role"] == "tool" and m.get("tool_call_id") not in seeded_tool_ids]
             assert len(receipts) == len(script)
             assert len({m["tool_call_id"] for m in receipts}) == len(script)
             offset = int(args.reminder)
@@ -202,6 +212,14 @@ def main():
                 assert "SUCCESS, RETURN: nested-proof" in receipts[offset + 4]["content"]
             assert receipts[-1]["content"].endswith("SUCCESS")
             assert not (source / "channels/.runtime/irc").exists()
+            if args.history_size >= 16:
+                first_messages = requests[0]["body"]["messages"]
+                old_seed = [m for m in first_messages if m.get("tool_call_id") == "seed-old-tool"]
+                recent_seed = [m for m in first_messages if m.get("tool_call_id") == "seed-recent-tool"]
+                assert (len(old_seed) == 1
+                        and old_seed[0]["content"].endswith(" [TRUNCATED]")
+                        and len(old_seed[0]["content"]) < 400), old_seed
+                assert len(recent_seed) == 1 and recent_seed[0]["content"] == "R" * 400, recent_seed
             if args.history_size >= 100:
                 assert len(experience) <= 100
                 assert not any(m.get("content") == "old fixture 0" for m in experience)

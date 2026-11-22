@@ -77,7 +77,7 @@ From the Iter repository root, the recommended core build supports:
 "$CETTA_BIN" --lang petta tests/worker.metta < /dev/null
 "$CETTA_BIN" --lang petta tests/worker_wire.metta < /dev/null
 "$CETTA_BIN" --lang petta tests/llm_request.metta < /dev/null
-python3 tests/loop_local.py --binary "$CETTA_BIN" --evidence ./test-evidence/loop
+python3 tests/loop_local.py --binary "$CETTA_BIN" --evidence ./test-evidence/loop --history-size 105
 ```
 
 The evidence directory must be new. The loop fixture uses a local HTTP server;
