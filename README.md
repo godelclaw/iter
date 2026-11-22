@@ -65,9 +65,18 @@ export AI_API_KEY='YOUR_ENDPOINT_KEY'
 
 `ITER_ENABLE_THINKING` is unset by default: no `enable_thinking` extension is
 sent. Set it to `true` or `false` only if your server documents that option.
-An invalid setting is a configuration error. The other settings are at the top
-of `iter.metta`. Module calls exchange requests/results through `.runtime/` in
-the Iter workspace. IRC stays idle until `ITER_IRC_HOST` is set.
+An invalid setting is a configuration error. Loop limits and budgets at the top
+of `iter.metta` (`MAX_TOKENS=5000`, `MAX_EXPERIENCE_SIZE`, `RETAIN_EXPERIENCE_SIZE`,
+`MAX_TOOLS`, `MAX_SKILLS`, `MAX_CONTEXT_TRANSFORMATIONS`, `TOOL_CHOICE=required`,
+`LLM_BACKUP_MODEL`, `INIT_WAIT`, etc.) can be overridden by environment variables;
+`LLM_BACKUP_MODEL` is unset by default and only used as a single fallback on
+primary refusal or error when explicitly set. Markdown skills under `skills/` are
+indexed by path and first-line `DESCRIPTION="..."` only (files or folders whose
+name starts with `_` are ignored). Structured console output and `.iter-ui-pin.json`
+pinned-panel state live in `iter_log.metta` (the fullscreen Python curses TUI is
+not used in the pure-C port; copy `tools/_ui.metta` to `tools/ui.metta` to enable
+the pinned-panel tool). Module calls exchange requests/results through `.runtime/`
+in the Iter workspace. IRC stays idle until `ITER_IRC_HOST` is set.
 
 ## Tests
 
@@ -78,6 +87,7 @@ From the Iter repository root, the recommended core build supports:
 "$CETTA_BIN" --lang petta tests/worker_wire.metta < /dev/null
 "$CETTA_BIN" --lang petta tests/llm_request.metta < /dev/null
 python3 tests/loop_local.py --binary "$CETTA_BIN" --evidence ./test-evidence/loop --history-size 105
+python3 tests/upstream_774f805_local.py --binary "$CETTA_BIN" --evidence ./test-evidence/upstream-774f805
 ```
 
 The evidence directory must be new. The loop fixture uses a local HTTP server;

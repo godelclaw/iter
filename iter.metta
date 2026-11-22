@@ -1,5 +1,7 @@
 ;; Iter main loop ("# 4. Main loop" of the original iter.py) in MeTTa (PeTTa).
-;; utils.metta provides the helpers (dynamic execution, JSON, file listing), iter_llm.metta the model call.
+;; utils.metta provides the helpers (dynamic execution, JSON, file listing, skills),
+;; iter_llm.metta the model call (with optional LLM_BACKUP_MODEL fallback), and
+;; iter_log.metta the structured terminal output and persistent pinned panel.
 ;; All configuration is here and passed onward to the utils functions as arguments.
 ;; Python variables of the loop are MeTTa states with the same names (&experience, &post_task_mode, ...).
 ;; Experience messages are atoms: (user "c") (system "c") (tool "call_id" "c") (assistant <json>) (raw <json>)
@@ -10,27 +12,32 @@
 ;; --------------------------------------------------------------------
 ;; 0. Configuration:
 ;; --------------------------------------------------------------------
-(= (LLM_TIMEOUT) 600)
-(= (MAX_TOKENS) 2524)
-(= (MAX_TOOLS) 30)
-(= (MAX_TOOL_DESCRIPTION_CHARS) 500)
-(= (DYNAMIC_TIMEOUT) 5)
+(= (MAX_MEMORY_CHARS) (env-int "MAX_MEMORY_CHARS" 3000)) ;When memory turns into an index
+(= (LLM_TIMEOUT) (env-num "LLM_TIMEOUT" 600))
+(= (KEEP_REASONING_IN_EPISODE) (env-bool "KEEP_REASONING_IN_EPISODE" "True"))
+(= (PRINT_CALLS) (env-bool "PRINT_CALLS" "False"))
+(= (MAX_TOOL_CALLS) (env-int "MAX_TOOL_CALLS" 10))
+(= (MAX_TOOL_OUTPUT_CHARS) (env-int "MAX_TOOL_OUTPUT_CHARS" 5000))
+(= (MAX_EXPERIENCE_SIZE) (env-int "MAX_EXPERIENCE_SIZE" 100))   ;20 percent
+(= (RETAIN_EXPERIENCE_SIZE) (env-int "RETAIN_EXPERIENCE_SIZE" 80)) ;jumps
+(= (MAX_FAST_STEPS) (env-int "MAX_FAST_STEPS" 50))
+(= (SLOW_STEP_DELAY) (env-int "SLOW_STEP_DELAY" 10))
+(= (ERROR_RECOVERY_TIME) (env-num "ERROR_RECOVERY_TIME" 1)) ;after how long to retry when exception occurs
+(= (RETURN_VALUE_PRESERVE) (env-int "RETURN_VALUE_PRESERVE" 0))
+(= (RETURN_VALUE_PRESERVE_MESSAGES) (env-int "RETURN_VALUE_PRESERVE_MESSAGES" 10))
+(= (DEFAULT_DELAY) (env-num "DEFAULT_DELAY" 0)) ;default delay added regardless of whether in slow mode
+(= (MAX_TOKENS) (env-int "MAX_TOKENS" 5000))
+(= (INIT_WAIT) (env-num "INIT_WAIT" 10))
+(= (MAX_TOOLS) (env-int "MAX_TOOLS" 30))
+(= (MAX_SKILLS) (env-int "MAX_SKILLS" 30))
+(= (MAX_CONTEXT_TRANSFORMATIONS) (env-int "MAX_CONTEXT_TRANSFORMATIONS" 30))
+(= (MAX_TOOL_DESCRIPTION_CHARS) (env-int "MAX_TOOL_DESCRIPTION_CHARS" 500))
+(= (DYNAMIC_TIMEOUT) (env-num "DYNAMIC_TIMEOUT" 5))
 (= (MODEL) (system:getenv-or-default "LLM_MODEL" "mlx-community/gemma-4-26b-a4b-it-4bit"))
+(= (BACKUP_MODEL) (system:getenv-or-default "LLM_BACKUP_MODEL" ""))
 (= (BASE_URL) (system:getenv-or-default "BASE_URL" "http://127.0.0.1:8000/v1"))
 (= (API_KEY) (system:getenv-or-default "AI_API_KEY" "dummy"))
-(= (MAX_MEMORY_CHARS) 3000) ;When memory turns into an index
-(= (KEEP_REASONING_IN_EPISODE) true)
-(= (MAX_TOOL_CALLS) 10)
-(= (MAX_TOOL_OUTPUT_CHARS) 5000)
-(= (MAX_EXPERIENCE_SIZE) 100)   ;20 percent
-(= (RETAIN_EXPERIENCE_SIZE) 80) ;jumps
-(= (MAX_FAST_STEPS) 50)
-(= (SLOW_STEP_DELAY) 10)
-(= (ERROR_RECOVERY_TIME) 1) ;after how long to retry when exception occurs
-(= (RETURN_VALUE_PRESERVE) 0)
-(= (RETURN_VALUE_PRESERVE_MESSAGES) 10)
-(= (DEFAULT_DELAY) 0) ;default delay added irregard of whether in slow mode
-(= (INIT_WAIT) 10)
+(= (TOOL_CHOICE) (system:getenv-or-default "TOOL_CHOICE" "required"))
 
 ;; --------------------------------------------------------------------
 ;; Small helpers
@@ -53,7 +60,9 @@
                                          (receive_channel $path (DYNAMIC_TIMEOUT)))
                                $event (not (empty-string $event)))))
 
-(= (slow_wait_for_input) (slow_wait_for_input 0))
+(= (slow_wait_for_input)
+   (progn (iter-log:wait (SLOW_STEP_DELAY))
+          (slow_wait_for_input 0)))
 (= (slow_wait_for_input $second)
    (if (>= $second (SLOW_STEP_DELAY))
        ""
@@ -100,6 +109,7 @@
               (init_client (BASE_URL) (API_KEY) (LLM_TIMEOUT))
               (sleep (INIT_WAIT))
               (fs:make-directories "memory" 511)
+              (fs:make-directories "skills" 511)
               (fs:make-directories "transformations" 511)
               (change-state! &post_task_mode false)
               (change-state! &autonomous_steps 0)
@@ -107,6 +117,7 @@
               (change-state! &pending_event_append "")
               ;; cleanup_bucket = -1 (runs cleanup_old_messages once on restart; upstream uses len(experience) // cleanup_interval)
               (change-state! &cleanup_bucket -1)
+              (iter-log:header (MODEL) (iter-llm:session-id) (size-atom (get-state &experience)))
               (Loop))))))
 
 ;; while True:
@@ -125,7 +136,7 @@
      (case (collapse (once (Step)))
        (((ok) _)
         ;; except Exception as error:
-        ($error (progn (println! (str-cat ("Output> " (if (== $error ()) "no result" (error_text (car-atom $error))))))
+        ($error (progn (iter-log:failure (if (== $error ()) "no result" (error_text (car-atom $error))))
                        (change-state! &experience (take (get-state &history_checkpoint) (get-state &experience)))
                        (sleep (ERROR_RECOVERY_TIME))))))
      (cut)
@@ -136,16 +147,14 @@
 (= (Step)
    (progn
      (sleep (DEFAULT_DELAY))
-     (println! "BEFORE RECEIVE")
      (change-state! &event_append (if (empty-string (get-state &pending_event_append))
                                       (receive)
                                       (get-state &pending_event_append)))
-     (println! "AFTER RECEIVE")
      (if (not (empty-string (get-state &event_append)))
          (progn (change-state! &autonomous_steps 0)
                 (change-state! &new_burst false)
                 (change-state! &post_task_mode false)
-                (println! (str-cat ("IN FROM CHANNEL " (get-state &event_append))))
+                (iter-log:incoming (get-state &event_append))
                 (push! &experience (user (step (get-state &event_append))))
                 (save_experience)
                 (change-state! &pending_event_append "")
@@ -153,6 +162,7 @@
          (if (get-state &new_burst)
              (progn (change-state! &post_task_mode true)
                     (change-state! &new_burst false)
+                    (iter-log:status "Autonomous task selection")
                     (change-state! &base_temporary_message ((user (step "[TASK COMPLETED. DO NOT RE-SEND THE COMPLETED RESPONSE BUT SEND IN CASE YOU FORGOT. NOW QUERY FOR AND PICK A TASK BASED ON YOUR GOALS, PREFERABLY MEMORY CONSOLIDATION: FINDING EPISODES WHICH SUPPORT / CONTRADICT LTM ITEMS, LINKING EPISODES, PROMOTING USEFUL MEMORIES]")))))
              (if (get-state &post_task_mode)
                  (change-state! &base_temporary_message ((user (step "[NO NEW USER INPUT. CONTINUE AUTONOMOUS WORK. DO NOT REPEAT THE PREVIOUS RESPONSE. ONLY USE send FOR GENUINELY NEW INFORMATION OR WHEN USER INPUT IS NEEDED.]"))))
@@ -162,15 +172,12 @@
        (((Error $what $why) (Error $what $why))
         ($answered
          (progn
-           (println! (str-cat ("RESPONSE " (get-state &response) "\nFINISH_REASON " (get-state &finish_reason) "\nUSAGE " (get-state &usage))))
            (push! &experience (assistant (if (KEEP_REASONING_IN_EPISODE)
                                              (get-state &message)
                                              (strip_reasoning (get-state &message)))))
-           (change-state! &tool_outputs ())
            (map-atom (get-state &tool_calls) $tool_call (ToolCall $tool_call))
            (change-state! &history_checkpoint (size-atom (get-state &experience))) ;tool calls succeeded, even on later exception we won't unroll them
            (save_experience)
-           (println! (str-cat ("Output> " (str:join "\n" (get-state &tool_outputs)))))
            (change-state! &autonomous_steps (if (empty-string (get-state &event_append)) (+ (get-state &autonomous_steps) 1) 0))
            (let $called_nop (is-member "nop" (map-atom (get-state &tool_calls) $call (index-atom $call 1)))
                 (if $called_nop
@@ -189,60 +196,87 @@
      (change-state! &temporary_message (append (get-state &base_temporary_message) $retry_message))
      (let ($INOPS $omitted_tools $tool_load_error) (load_tools (MAX_TOOLS) (MAX_TOOL_DESCRIPTION_CHARS) (DYNAMIC_TIMEOUT))
           (progn (change-state! &INOPS $INOPS)
-                 (if (not (empty-string $tool_load_error)) (push! &temporary_message (user $tool_load_error)) _)
+                 (if (not (empty-string $tool_load_error))
+                     (progn (iter-log:error "TOOL !" $tool_load_error)
+                            (push! &temporary_message (user $tool_load_error))) _)
                  (if (> $omitted_tools 0)
-                     (push! &temporary_message (user (str-cat ("[TOOL LIMIT REACHED: " $omitted_tools " tools are currently omitted. Consolidate or remove tools if they are needed.]")))) _)))
+                     (progn (iter-log:warning "WARN" (str-cat ($omitted_tools " tools excluded (MAX_TOOLS=" (MAX_TOOLS) ")")))
+                            (push! &temporary_message (user (str-cat ("[TOOL LIMIT REACHED: " $omitted_tools " tools are currently omitted. Consolidate or remove tools if they are needed.]"))))) _)))
      (change-state! &TOOLS (native_tools (get-state &INOPS)))
-     (change-state! &TRANSFORMATIONS (load_transformation_descriptions (DYNAMIC_TIMEOUT)))
+     (let ($TRANSFORMATIONS $active_transformations $omitted_transformations)
+          (load_transformation_descriptions (MAX_CONTEXT_TRANSFORMATIONS) (DYNAMIC_TIMEOUT))
+          (progn (change-state! &TRANSFORMATIONS $TRANSFORMATIONS)
+                 (change-state! &ACTIVE_TRANSFORMATIONS $active_transformations)
+                 (if (> $omitted_transformations 0)
+                     (progn (iter-log:warning "XFORM !" (str-cat ($omitted_transformations " transformations excluded (MAX_CONTEXT_TRANSFORMATIONS=" (MAX_CONTEXT_TRANSFORMATIONS) ")")))
+                            (push! &temporary_message (user (str-cat ("[CONTEXT TRANSFORMATION LIMIT REACHED: " $omitted_transformations " transformations are omitted and will not execute. Consolidate or remove transformations if they are needed.]"))))) _)))
+     (let ($SKILLS $omitted_skills) (load_skills (MAX_SKILLS))
+          (progn (change-state! &SKILLS $SKILLS)
+                 (if (> $omitted_skills 0)
+                     (progn (iter-log:warning "SKILLS !" (str-cat ($omitted_skills " skills excluded (MAX_SKILLS=" (MAX_SKILLS) ")")))
+                            (push! &temporary_message (user (str-cat ("[SKILL LIMIT REACHED: " $omitted_skills " Markdown skills are omitted. Consolidate or remove skills if they are needed.]"))))) _)))
      (let* (($memory_contents (memory_files))
             ($memory_len (foldl-atom $memory_contents 0 $acc $mc (+ $acc (str:char-length (index-atom $mc 1))))))
            (if (<= $memory_len (MAX_MEMORY_CHARS))
                (change-state! &MEMORY (str-cat ("[" (- (MAX_MEMORY_CHARS) $memory_len) " CHARACTERS BELOW MAXIMUM]\n./memory/:\n"
                                                 (str:join "\n\n" (map-atom $memory_contents $mc (let ($path $content) $mc (str-cat ($path ":\n" $content))))))))
                (progn (change-state! &MEMORY (str-cat ("./memory/:\n" (str:join "\n" (map-atom $memory_contents $mc (index-atom $mc 0))))))
+                      (iter-log:warning "MEMORY !" (str-cat ("Capacity exceeded by " (- $memory_len (MAX_MEMORY_CHARS)) " characters")))
                       (push! &temporary_message (user (str-cat ("[MEMORY FOLDER TOTAL CHARACTER CAPACITY BY FILES NOT BEGINNING WITH _ EXCEEDED BY " (- $memory_len (MAX_MEMORY_CHARS)) " CHARS. FIX THIS FIRST.]")))))))
      (change-state! &request_messages (cons-atom (system (str-cat ("prompt.txt:\n" (read_prompt)
                                                                    "\n\n./transformations/:\n" (get-state &TRANSFORMATIONS)
-                                                                   "\n\n" (get-state &MEMORY))))
+                                                                   "\n\n" (get-state &MEMORY)
+                                                                   "\n\n" (get-state &SKILLS))))
                                                  (append (get-state &experience) (get-state &temporary_message))))
-     (let ($request_messages $request_tools $transformation_error) (apply_transformation (get-state &request_messages) (get-state &TOOLS) (DYNAMIC_TIMEOUT))
+     (let ($request_messages $request_tools $transformation_error)
+          (apply_transformation (get-state &request_messages) (get-state &TOOLS) (get-state &ACTIVE_TRANSFORMATIONS) (DYNAMIC_TIMEOUT))
           (progn (change-state! &request_messages $request_messages)
                  (change-state! &request_tools $request_tools)
-                 (if (not (empty-string $transformation_error)) (push! &request_messages (user $transformation_error)) _)))
-     (println! "BEFORE LLM")
-     (case (llm (get-state &request_messages) (get-state &request_tools) (MODEL) (MAX_TOKENS))
-       (((Error $what $why) (Error $what $why))
-        (($message $finish_reason $response $usage)
-         (progn (change-state! &message $message)
-                (change-state! &finish_reason $finish_reason)
-                (change-state! &response $response)
-                (change-state! &usage $usage)
-                (println! (str-cat ("AFTER LLM " (get-state &response))))
-                (let $content (message_content (get-state &message))
-                     (if (not (empty-string $content))
-                         (change-state! &message (set_message_content (get-state &message) (str-cat ($content "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]")))) _))
-                (change-state! &tool_calls (message_tool_calls (get-state &message)))
-                (if (not (== (get-state &tool_calls) ()))
-                    (progn (change-state! &message (limit_tool_calls (get-state &message) (MAX_TOOL_CALLS)))
-                           (change-state! &tool_calls (take (MAX_TOOL_CALLS) (get-state &tool_calls)))) ;break
-                    (LLMLoop (if (== (get-state &finish_reason) "length")
-                                 ((user "[OUTPUT TOKEN LIMIT REACHED. CALL THE REQUIRED TOOL CONCISELY.]"))
-                                 ((user (str-cat ("[YOUR PREVIOUS RESPONSE CONTAINED NO TOOL CALL AND WAS NOT DELIVERED. CALL AT LEAST ONE TOOL NOW. IF YOU INTENDED THIS CONTENT AS COMMUNICATION, USE send: "
-                                                  (message_content_repr (get-state &message)) "]")))))))))))))
+                 (if (not (empty-string $transformation_error))
+                     (progn (iter-log:error "XFORM !" $transformation_error)
+                            (push! &request_messages (user $transformation_error))) _)))
+     (iter-log:llm-start)
+     (let $started (system:wall-time)
+       (case (llm_with_backup (get-state &request_messages) (get-state &request_tools) (MODEL) (BACKUP_MODEL) (TOOL_CHOICE) (MAX_TOKENS))
+         (((Error $what $why) (Error $what $why))
+          (($used_model $message $finish_reason $response $usage)
+           (progn (if (not (== $used_model (MODEL)))
+                      (iter-log:warning "BACKUP !" (str-cat ((MODEL) " refused; used LLM_BACKUP_MODEL " $used_model))) _)
+                  (change-state! &message $message)
+                  (change-state! &finish_reason $finish_reason)
+                  (change-state! &response $response)
+                  (change-state! &usage $usage)
+                  (let $calls (message_tool_calls (get-state &message))
+                    (iter-log:llm-complete (- (system:wall-time) $started) (get-state &usage) (size-atom $calls)))
+                  (let $content (message_content (get-state &message))
+                       (if (not (empty-string $content))
+                           (change-state! &message (set_message_content (get-state &message) (str-cat ($content "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]")))) _))
+                  (change-state! &tool_calls (message_tool_calls (get-state &message)))
+                  (if (not (== (get-state &tool_calls) ()))
+                      (progn (change-state! &message (limit_tool_calls (get-state &message) (MAX_TOOL_CALLS)))
+                             (change-state! &tool_calls (take (MAX_TOOL_CALLS) (get-state &tool_calls)))) ;break
+                      (if (== (get-state &finish_reason) "length")
+                          (progn (iter-log:retry "Output token limit reached without a tool call")
+                                 (LLMLoop ((user "[OUTPUT TOKEN LIMIT REACHED. CALL THE REQUIRED TOOL CONCISELY.]"))))
+                          (progn (iter-log:retry "No tool call returned; requesting one")
+                                 (LLMLoop ((user (str-cat ("[YOUR PREVIOUS RESPONSE CONTAINED NO TOOL CALL AND WAS NOT DELIVERED. CALL AT LEAST ONE TOOL NOW. IF YOU INTENDED THIS CONTENT AS COMMUNICATION, USE send: "
+                                                           (message_content_repr (get-state &message)) "]")))))))))))))))
 
 ;; Body of "for tool_call in message.tool_calls:"
 (= (ToolCall ($id $tool_name $arguments))
    (let* ((($status $tool_arguments $parse_error) (parse_tool_arguments $arguments))
           ($tool (filter-atom (get-state &INOPS) $inop (== (index-atom $inop 0) $tool_name)))
-          ($ret0 (if (== $status invalid)
-                     $parse_error
-                     (if (== $tool ())
-                         (str-cat ("Unknown tool: " $tool_name))
-                         (if (== $status notdict)
-                             "Tool arguments must be a JSON object"
-                             (invoke_tool (index-atom (car-atom $tool) 1) $arguments (DYNAMIC_TIMEOUT))))))
+          (($failed $ret0) (if (== $status invalid)
+                               (true $parse_error)
+                               (if (== $tool ())
+                                   (true (str-cat ("Unknown tool: " $tool_name)))
+                                   (if (== $status notdict)
+                                       (true "Tool arguments must be a JSON object")
+                                       (case (invoke_tool_checked (index-atom (car-atom $tool) 1) $arguments (DYNAMIC_TIMEOUT))
+                                         (((ok $res) (false $res))
+                                          ((failed $err) (true $err))))))))
           ($ret (if (> (str:char-length $ret0) (MAX_TOOL_OUTPUT_CHARS)) (truncate $ret0 (MAX_TOOL_OUTPUT_CHARS)) $ret0)))
          (progn (push! &experience (tool $id (step $ret)))
-                (push! &tool_outputs (str-cat ("tool call: " $tool_name " " $tool_arguments "\ntool return: " $ret))))))
+                (iter-log:tool-call $tool_name $tool_arguments $ret $failed))))
 
 !(main)

@@ -14,6 +14,8 @@
 !(import! &self (library system))
 !(import! &self (library proc))
 !(import! &self (library io))
+!(import! &self lib_text)
+!(import! &self iter_log)
 !(import! &self iter_llm)
 
 ;; --------------------------------------------------------------------
@@ -24,6 +26,28 @@
 (= (str-cat $parts) (str:join "" (map-atom $parts $part (text $part))))
 (= (is-string $atom) (== (get-type $atom) String))
 (= (first-n $n $list) (if (or (<= $n 0) (== $list ())) () (cons-atom (car-atom $list) (first-n (- $n 1) (cdr-atom $list)))))
+
+;; Environment configuration parsers matching upstream iter.py's os.getenv defaults.
+(= (env-int $name $default)
+   (let $raw (system:getenv-or-default $name "")
+     (if (== $raw "")
+         $default
+         (let $parsed (str:string->number (text:strip $raw))
+           (if (and (== (get-type $parsed) Number) (== $parsed (floor-math $parsed)))
+               (floor-math $parsed)
+               (Error "Configuration" (str-cat ($name " must be an integer, got " $raw))))))))
+
+(= (env-num $name $default)
+   (let $raw (system:getenv-or-default $name "")
+     (if (== $raw "")
+         $default
+         (let $parsed (str:string->number (text:strip $raw))
+           (if (== (get-type $parsed) Number)
+               $parsed
+               (Error "Configuration" (str-cat ($name " must be a number, got " $raw))))))))
+
+(= (env-bool $name $default)
+   (== (system:getenv-or-default $name $default) "True"))
 
 ;; "what: why" of an (Error what why), as Python printed an exception
 (= (error_text $error)
@@ -312,10 +336,67 @@
 (= (native_tools $inops) (JsonArray (map-atom $inops $inop (native_tool $inop))))
 
 (= (load_transformation_descriptions $timeout)
-   (str:join "\n" (map-atom (module-files "transformations") $path
-                            (case (invoke_dynamic $path "__description__" () (no-kwargs) $timeout)
-                              (((ok $description) (str-cat ((module-name $path) ": " $description)))
-                               ($error (str-cat ((module-name $path) ": [DESCRIPTION MISSING]"))))))))
+   (let ($descriptions $active $omitted) (load_transformation_descriptions 30 $timeout)
+     $descriptions))
+
+(= (load_transformation_descriptions $max_transformations $timeout)
+   (let* (($paths (module-files "transformations"))
+          ($active (first-n $max_transformations $paths))
+          ($total (size-atom $paths))
+          ($omitted (if (> $total $max_transformations) (- $total $max_transformations) 0))
+          ($entries (map-atom $active $path
+                      (case (invoke_dynamic $path "__description__" () (no-kwargs) $timeout)
+                        (((ok $description) (str-cat ((module-name $path) ": " $description)))
+                         ($error (str-cat ((module-name $path) ": [DESCRIPTION MISSING]"))))))))
+     ((str:join "\n" $entries) $active $omitted)))
+
+;; Exact match for DESCRIPTION="(?:[^"\\]|\\.)*" on the first line of a Markdown skill.
+(= (valid-skill-description $line)
+   (if (str:starts-with $line "DESCRIPTION=\"")
+       (skill-desc-scan $line 13 (str:char-length $line) false)
+       false))
+(= (skill-desc-scan $line $i $len $escaped)
+   (if (>= $i $len)
+       false
+       (let $ch (str:char-slice $line $i (+ $i 1))
+         (if $escaped
+             (skill-desc-scan $line (+ $i 1) $len false)
+             (if (== $ch "\\")
+                 (skill-desc-scan $line (+ $i 1) $len true)
+                 (if (== $ch "\"")
+                     (== (+ $i 1) $len)
+                     (skill-desc-scan $line (+ $i 1) $len false)))))))
+
+(= (skill-first-line $raw)
+   (let* (($norm (text:universal-newlines $raw))
+          ($lines (str:split "\n" $norm)))
+     (if (== $lines ()) "" (text:strip (car-atom $lines)))))
+
+(= (skill-entry $path)
+   (let $raw (fs:read-text $path)
+     (if (is-string $raw)
+         (let* (($first (skill-first-line $raw))
+                ($desc (if (valid-skill-description $first)
+                           $first
+                           "[DESCRIPTION FIRST LINE MISSING]")))
+           (str-cat ("./" $path ": " $desc)))
+         (str-cat ("./" $path ": [READ ERROR: " (error_text $raw) "]")))))
+
+(= (skill-files)
+   (if (is-directory "skills")
+       (map-atom (sort-atom (map-atom (filter-atom (walk-files (fs:walk-open "skills")) $file (str:ends-with $file ".md"))
+                                      $file ((str:split "/" $file) $file)))
+                 $entry (let ($parts $path) $entry $path))
+       ()))
+
+;; Index Markdown skills by path and first-line DESCRIPTION only; returns (surface omitted).
+(= (load_skills $max_skills)
+   (let* (($paths (skill-files))
+          ($active (first-n $max_skills $paths))
+          ($total (size-atom $paths))
+          ($omitted (if (> $total $max_skills) (- $total $max_skills) 0))
+          ($entries (map-atom $active $path (skill-entry $path))))
+     ((str-cat ("./skills/:\n" (str:join "\n" $entries))) $omitted)))
 
 (= (transformation_step ($messages $tools $errors) $path $timeout)
    (case (invoke_dynamic $path "transform" (cons-atom $messages (cons-atom $tools ())) (no-kwargs) $timeout)
@@ -325,14 +406,23 @@
 
 ;; messages as atoms, tools as a JSON array
 (= (apply_transformation $messages $tools $timeout)
-   (let ($new_messages $new_tools $errors) (foldl-atom (module-files "transformations")
+   (apply_transformation $messages $tools (module-files "transformations") $timeout))
+
+(= (apply_transformation $messages $tools $paths $timeout)
+   (let ($new_messages $new_tools $errors) (foldl-atom $paths
                                                        ((JsonArray (map-atom $messages $atom (to_message $atom))) $tools ())
                                                        $state $path (transformation_step $state $path $timeout))
         (cons-atom (map-atom (json:array-items $new_messages) $message (from_message $message))
                    (cons-atom $new_tools (cons-atom (str:join "\n" $errors) ())))))
 
 ;; returns message finish_reason response usage, or the (Error what why) of a failed call
-(= (llm $messages $tools $model $max_tokens) (chat_completion (JsonArray (map-atom $messages $atom (to_message $atom))) $tools $model $max_tokens))
+(= (llm $messages $tools $model $max_tokens)
+   (chat_completion (JsonArray (map-atom $messages $atom (to_message $atom))) $tools $model $max_tokens))
+
+;; returns (used_model message finish_reason response usage), or (Error what why)
+(= (llm_with_backup $messages $tools $model $backup_model $tool_choice $max_tokens)
+   (chat_completion_with_backup (JsonArray (map-atom $messages $atom (to_message $atom)))
+                                $tools $model $backup_model $tool_choice $max_tokens))
 
 (= (message_content $message)
    (let $content (json:get $message "content")
@@ -369,7 +459,12 @@
 (= (python-json-error $value) (if (== (get-metatype $value) Expression) (== (car-atom $value) JsonPythonErrorV1) false))
 
 (= (invoke_tool $path $arguments $timeout)
+   (case (invoke_tool_checked $path $arguments $timeout)
+     (((ok $result) $result)
+      ((failed $result) $result))))
+
+(= (invoke_tool_checked $path $arguments $timeout)
    (case (invoke_dynamic $path "run" () (json:parse-python $arguments) $timeout)
-     (((ok JsonNull) "None")
-      ((ok $result) (text $result))
-      ((error $error) (str-cat ("Tool execution failed: " $error))))))
+     (((ok JsonNull) (ok "None"))
+      ((ok $result) (ok (text $result)))
+      ((error $error) (failed (str-cat ("Tool execution failed: " $error)))))))
